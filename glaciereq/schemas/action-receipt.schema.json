@@ -13,7 +13,8 @@
     "workspace",
     "payload_hash",
     "parent_hash",
-    "receipt_hash"
+    "receipt_hash",
+    "metadata"
   ],
   "properties": {
     "schema_version": { "const": 1 },
@@ -30,8 +31,22 @@
     "receipt_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "metadata": {
       "type": "object",
-      "additionalProperties": {
-        "type": ["string", "number", "integer", "boolean", "null"]
+      "additionalProperties": false,
+      "required": [
+        "tool_use_id",
+        "input_truncated",
+        "result_truncated",
+        "subagent_id",
+        "subagent_type",
+        "source"
+      ],
+      "properties": {
+        "tool_use_id": { "type": ["string", "null"] },
+        "input_truncated": { "type": "boolean" },
+        "result_truncated": { "type": "boolean" },
+        "subagent_id": { "type": ["string", "null"] },
+        "subagent_type": { "type": ["string", "null"] },
+        "source": { "const": "grok-project-hook" }
       }
     }
   }
