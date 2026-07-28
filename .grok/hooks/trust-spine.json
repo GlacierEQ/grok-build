@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -82,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -93,7 +93,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
@@ -104,7 +104,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.grok/hooks/trust-spine.py\"",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
             "timeout": 10
           }
         ]
