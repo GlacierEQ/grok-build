@@ -56,12 +56,12 @@
     },
     "supersedes": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true
     },
     "contradicts": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true
     },
     "tags": {
