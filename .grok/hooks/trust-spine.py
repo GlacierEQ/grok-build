@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
 import sys
-from typing import Any
+import time
+from typing import Any, Iterator
 
 SENSITIVE_KEY_PARTS = (
     "api_key",
@@ -30,6 +33,12 @@ RAW_PAYLOAD_KEYS = {
     "content",
 }
 MAX_SCALAR_LENGTH = 256
+LOCK_TIMEOUT_SECS = 5.0
+STALE_LOCK_SECS = 60.0
+
+
+class ChainIntegrityError(RuntimeError):
+    """Raised when an existing receipt log cannot be verified end to end."""
 
 
 def canonical(value: Any) -> bytes:
@@ -59,6 +68,10 @@ def scrub(value: Any, key: str = "") -> Any:
     return str(value)[:MAX_SCALAR_LENGTH]
 
 
+def optional_string(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
 def load_event() -> dict[str, Any]:
     raw = sys.stdin.buffer.read(4 * 1024 * 1024 + 1)
     if len(raw) > 4 * 1024 * 1024:
@@ -75,25 +88,81 @@ def receipt_path(event: dict[str, Any]) -> Path:
     return root / ".grok" / "runtime" / "trust-spine" / "receipts.jsonl"
 
 
-def last_hash(handle: Any) -> str | None:
+@contextmanager
+def exclusive_lock(path: Path) -> Iterator[None]:
+    """Acquire a cross-platform lock using atomic exclusive file creation."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = f"{os.getpid()}:{secrets.token_hex(16)}"
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECS
+    descriptor: int | None = None
+
+    while descriptor is None:
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(descriptor, token.encode("utf-8"))
+            os.fsync(descriptor)
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+                if age > STALE_LOCK_SECS:
+                    path.unlink()
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out acquiring receipt lock: {path}")
+            time.sleep(0.05)
+
+    try:
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            if path.read_text(encoding="utf-8") == token:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def verify_chain(handle: Any) -> str | None:
+    """Verify every existing record and return the final receipt hash."""
+
     handle.seek(0)
     previous: str | None = None
-    for line in handle:
+    seen_ids: set[str] = set()
+    for line_number, line in enumerate(handle, start=1):
+        if not line.endswith("\n"):
+            raise ChainIntegrityError(f"partial receipt line at {line_number}")
+        if not line.strip():
+            raise ChainIntegrityError(f"blank receipt line at {line_number}")
         try:
             item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        value = item.get("receipt_hash")
-        if isinstance(value, str) and len(value) == 64:
-            previous = value
+        except json.JSONDecodeError as error:
+            raise ChainIntegrityError(
+                f"malformed receipt JSON at line {line_number}"
+            ) from error
+        if not isinstance(item, dict):
+            raise ChainIntegrityError(f"non-object receipt at line {line_number}")
+        if item.get("parent_hash") != previous:
+            raise ChainIntegrityError(f"parent hash mismatch at line {line_number}")
+        stored_hash = item.get("receipt_hash")
+        if not isinstance(stored_hash, str) or len(stored_hash) != 64:
+            raise ChainIntegrityError(f"invalid receipt hash at line {line_number}")
+        core = dict(item)
+        core.pop("receipt_hash", None)
+        if sha256(core) != stored_hash:
+            raise ChainIntegrityError(f"receipt hash mismatch at line {line_number}")
+        receipt_id = item.get("receipt_id")
+        if not isinstance(receipt_id, str) or receipt_id in seen_ids:
+            raise ChainIntegrityError(f"duplicate or invalid receipt id at line {line_number}")
+        seen_ids.add(receipt_id)
+        previous = stored_hash
     return previous
 
 
-def main() -> int:
-    event = load_event()
-    path = receipt_path(event)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
+def build_receipt(event: dict[str, Any], parent_hash: str | None) -> dict[str, Any]:
     safe_event = scrub(event)
     event_name = str(
         event.get("hookEventName")
@@ -105,47 +174,50 @@ def main() -> int:
         event.get("timestamp")
         or dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     )
-    payload_hash = sha256(safe_event)
+    status = event.get("status") or event.get("outcome") or event.get("errorType")
+    core: dict[str, Any] = {
+        "schema_version": 1,
+        "receipt_id": "grx_" + secrets.token_hex(12),
+        "event_name": event_name,
+        "timestamp": timestamp,
+        "session_id": str(event.get("sessionId") or ""),
+        "workspace": str(event.get("workspaceRoot") or event.get("cwd") or ""),
+        "permission_mode": optional_string(event.get("permissionMode")),
+        "tool_name": optional_string(event.get("toolName")),
+        "status": optional_string(status),
+        "payload_hash": sha256(safe_event),
+        "parent_hash": parent_hash,
+        "metadata": {
+            "tool_use_id": optional_string(event.get("toolUseId")),
+            "input_truncated": bool(event.get("toolInputTruncated", False)),
+            "subagent_type": optional_string(event.get("subagentType")),
+            "source": "grok-project-hook",
+        },
+    }
+    core["receipt_hash"] = sha256(core)
+    return core
 
-    with path.open("a+", encoding="utf-8") as handle:
-        try:
-            import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            pass
+def emit_receipt(event: dict[str, Any]) -> dict[str, Any]:
+    """Verify the existing chain, append one receipt, and return it."""
 
-        parent = last_hash(handle)
-        core = {
-            "schema_version": 1,
-            "receipt_id": "grx_"
-            + hashlib.sha256(
-                f"{event.get('sessionId', '')}:{timestamp}:{payload_hash}".encode("utf-8")
-            ).hexdigest()[:24],
-            "event_name": event_name,
-            "timestamp": timestamp,
-            "session_id": str(event.get("sessionId") or ""),
-            "workspace": str(event.get("workspaceRoot") or event.get("cwd") or ""),
-            "permission_mode": event.get("permissionMode"),
-            "tool_name": event.get("toolName"),
-            "status": event.get("status")
-            or event.get("outcome")
-            or event.get("errorType"),
-            "payload_hash": payload_hash,
-            "parent_hash": parent,
-            "metadata": {
-                "tool_use_id": event.get("toolUseId"),
-                "input_truncated": bool(event.get("toolInputTruncated", False)),
-                "subagent_type": event.get("subagentType"),
-                "source": "grok-project-hook",
-            },
-        }
-        core["receipt_hash"] = sha256(core)
-        handle.seek(0, os.SEEK_END)
-        handle.write(json.dumps(core, sort_keys=True, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    path = receipt_path(event)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
 
+    with exclusive_lock(lock_path):
+        with path.open("a+", encoding="utf-8") as handle:
+            parent = verify_chain(handle)
+            receipt = build_receipt(event, parent)
+            handle.seek(0, os.SEEK_END)
+            handle.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    return receipt
+
+
+def main() -> int:
+    emit_receipt(load_event())
     return 0
 
 
