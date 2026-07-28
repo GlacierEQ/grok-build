@@ -38,6 +38,13 @@ for the version of the code present in this tree.
 
 ---
 
+> [!NOTE]
+> **GlacierEQ downstream:** this repository is actively writable and continuously
+> fine-tuned. `main` contains GlacierEQ product work; `upstream/main` tracks the
+> exact xAI source for repeatable updates. See
+> [`GLACIEREQ_DOWNSTREAM.md`](GLACIEREQ_DOWNSTREAM.md) for the branch, sync,
+> validation, and conflict-resolution model.
+
 ## Installing the released binary
 
 Prebuilt binaries are published for macOS, Linux, and Windows:
@@ -106,9 +113,10 @@ MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
 | `third_party/` | Vendored upstream source (Mermaid diagram stack) — see below |
 
 > [!IMPORTANT]
-> The root `Cargo.toml` (workspace members, dependency versions, lints,
-> profiles) is **generated** — treat it as read-only. Prefer editing per-crate
-> `Cargo.toml` files.
+> The root `Cargo.toml` (workspace members, dependency versions, lints, and
+> profiles) is generated. Prefer changing the responsible generator or per-crate
+> manifest and regenerating the root so future upstream syncs do not overwrite
+> an unexplained direct edit.
 
 ## Development
 
