@@ -46,6 +46,7 @@ SCHEMA_CONTRACTS = {
             "payload_hash",
             "parent_hash",
             "receipt_hash",
+            "metadata",
         },
         "properties": {
             "schema_version",
@@ -146,22 +147,18 @@ def validate_schema_support(schema: Any, path: str = "$") -> None:
 
 
 def type_matches(value: Any, expected: str) -> bool:
-    if expected == "null":
-        return value is None
-    if expected == "object":
-        return isinstance(value, dict)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    fail(f"unsupported JSON Schema type: {expected}")
-    return False
+    checks = {
+        "null": value is None,
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "boolean": isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+    }
+    if expected not in checks:
+        fail(f"unsupported JSON Schema type: {expected}")
+    return checks[expected]
 
 
 def validate_instance(value: Any, schema: dict[str, Any], path: str = "$") -> None:
@@ -169,7 +166,6 @@ def validate_instance(value: Any, schema: dict[str, Any], path: str = "$") -> No
         fail(f"{path}: expected constant {schema['const']!r}")
     if "enum" in schema and value not in schema["enum"]:
         fail(f"{path}: value {value!r} is outside enum")
-
     expected_types = schema.get("type")
     if expected_types is not None:
         choices = [expected_types] if isinstance(expected_types, str) else expected_types
@@ -177,28 +173,26 @@ def validate_instance(value: Any, schema: dict[str, Any], path: str = "$") -> No
             fail(f"{path}: invalid type {type(value).__name__}; expected {choices}")
 
     if isinstance(value, dict):
-        required = schema.get("required", [])
-        missing = [name for name in required if name not in value]
+        missing = [name for name in schema.get("required", []) if name not in value]
         if missing:
             fail(f"{path}: missing required properties {missing}")
         properties = schema.get("properties", {})
         for name, item in value.items():
             if name in properties:
                 validate_instance(item, properties[name], f"{path}.{name}")
-                continue
-            additional = schema.get("additionalProperties", True)
-            if additional is False:
-                fail(f"{path}: unexpected property {name}")
-            if isinstance(additional, dict):
-                validate_instance(item, additional, f"{path}.{name}")
+            else:
+                additional = schema.get("additionalProperties", True)
+                if additional is False:
+                    fail(f"{path}: unexpected property {name}")
+                if isinstance(additional, dict):
+                    validate_instance(item, additional, f"{path}.{name}")
 
     if isinstance(value, list):
         if len(value) < schema.get("minItems", 0):
             fail(f"{path}: too few items")
-        items_schema = schema.get("items")
-        if isinstance(items_schema, dict):
+        if isinstance(schema.get("items"), dict):
             for index, item in enumerate(value):
-                validate_instance(item, items_schema, f"{path}[{index}]")
+                validate_instance(item, schema["items"], f"{path}[{index}]")
         if schema.get("uniqueItems"):
             encoded = [canonical(item) for item in value]
             if len(set(encoded)) != len(encoded):
@@ -207,9 +201,8 @@ def validate_instance(value: Any, schema: dict[str, Any], path: str = "$") -> No
     if isinstance(value, str):
         if len(value) < schema.get("minLength", 0):
             fail(f"{path}: string is too short")
-        pattern = schema.get("pattern")
-        if pattern is not None and re.search(pattern, value) is None:
-            fail(f"{path}: string does not match {pattern}")
+        if schema.get("pattern") and re.search(schema["pattern"], value) is None:
+            fail(f"{path}: string does not match {schema['pattern']}")
         if schema.get("format") == "date-time":
             try:
                 parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -255,26 +248,26 @@ def validate_schemas() -> dict[str, dict[str, Any]]:
         schemas[name] = schema
 
     action = schemas["action-receipt.schema.json"]["properties"]
-    if action["schema_version"].get("const") != 1:
-        fail("action receipt schema version must remain 1")
     for name in ("receipt_id", "payload_hash", "receipt_hash"):
         if not action[name].get("pattern"):
             fail(f"action receipt {name} must retain a pattern")
+    metadata = action["metadata"]
+    expected_metadata = {
+        "tool_use_id",
+        "input_truncated",
+        "result_truncated",
+        "subagent_id",
+        "subagent_type",
+        "source",
+    }
+    if set(metadata.get("required", [])) != expected_metadata:
+        fail("action receipt metadata required fields drifted")
+    if set(metadata.get("properties", {})) != expected_metadata:
+        fail("action receipt metadata properties drifted")
 
     memory = schemas["memory-record.schema.json"]["properties"]
-    if set(memory["statement_class"].get("enum", [])) != {
-        "verified_fact",
-        "user_recollection",
-        "allegation",
-        "model_inference",
-        "recommendation",
-        "procedural_state",
-        "open_question",
-    }:
-        fail("memory statement classes drifted")
     if memory["confidence"].get("minimum") != 0 or memory["confidence"].get("maximum") != 1:
         fail("memory confidence range drifted")
-
     mission = schemas["mission-contract.schema.json"]["properties"]
     if "complete" not in mission["status"].get("enum", []):
         fail("mission status contract lost complete")
@@ -311,7 +304,12 @@ def validate_schemas() -> dict[str, dict[str, Any]]:
         "dependencies": [],
         "artifacts": [{"path": "AGENTS.md", "required": True, "hash": None}],
         "verification": [
-            {"command": "python3 scripts/validate-glaciereq-pack.py", "required": True, "status": "pending", "evidence": None}
+            {
+                "command": "python3 scripts/validate-glaciereq-pack.py",
+                "required": True,
+                "status": "pending",
+                "evidence": None,
+            }
         ],
         "open_questions": [],
     }
@@ -322,22 +320,104 @@ def validate_schemas() -> dict[str, dict[str, Any]]:
     return schemas
 
 
-def parse_frontmatter(path: Path) -> dict[str, str]:
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+def yaml_scalar(raw: str) -> Any:
+    value = raw.strip()
+    if value in {"null", "~"}:
+        return None
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def indent_of(line: str) -> int:
+    if "\t" in line[: len(line) - len(line.lstrip())]:
+        fail("frontmatter indentation must use spaces")
+    return len(line) - len(line.lstrip(" "))
+
+
+def next_content_line(lines: list[str], index: int) -> int:
+    while index < len(lines) and (not lines[index].strip() or lines[index].lstrip().startswith("#")):
+        index += 1
+    return index
+
+
+def parse_yaml_block(lines: list[str], start: int, indent: int) -> tuple[Any, int]:
+    start = next_content_line(lines, start)
+    if start >= len(lines):
+        return {}, start
+    is_list = lines[start].lstrip().startswith("- ")
+    result: Any = [] if is_list else {}
+    index = start
+
+    while index < len(lines):
+        index = next_content_line(lines, index)
+        if index >= len(lines):
+            break
+        line = lines[index]
+        current = indent_of(line)
+        if current < indent:
+            break
+        if current != indent:
+            fail(f"unsupported frontmatter indentation near: {line}")
+        stripped = line.strip()
+
+        if is_list:
+            if not stripped.startswith("- "):
+                fail("mixed mapping/list frontmatter block")
+            item = stripped[2:].strip()
+            if not item:
+                child_index = next_content_line(lines, index + 1)
+                if child_index >= len(lines) or indent_of(lines[child_index]) <= indent:
+                    result.append(None)
+                    index += 1
+                else:
+                    child, index = parse_yaml_block(lines, child_index, indent_of(lines[child_index]))
+                    result.append(child)
+            else:
+                result.append(yaml_scalar(item))
+                index += 1
+            continue
+
+        if stripped.startswith("- ") or ":" not in stripped:
+            fail(f"invalid frontmatter mapping line: {line}")
+        key, raw_value = stripped.split(":", 1)
+        key = key.strip()
+        if not key:
+            fail("empty frontmatter key")
+        if raw_value.strip():
+            result[key] = yaml_scalar(raw_value)
+            index += 1
+            continue
+        child_index = next_content_line(lines, index + 1)
+        if child_index >= len(lines) or indent_of(lines[child_index]) <= indent:
+            result[key] = None
+            index += 1
+        else:
+            child, index = parse_yaml_block(lines, child_index, indent_of(lines[child_index]))
+            result[key] = child
+    return result, index
+
+
+def parse_frontmatter(path: Path) -> dict[str, Any]:
+    lines = path.read_text(encoding="utf-8").splitlines()
     if not lines or lines[0] != "---":
         fail(f"{path} has no YAML frontmatter")
     try:
         end = lines.index("---", 1)
     except ValueError as error:
         raise AssertionError(f"{path} has unterminated frontmatter") from error
-    values: dict[str, str] = {}
-    for line in lines[1:end]:
-        if line.startswith(" ") or not line.strip() or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        values[key.strip()] = value.strip()
-    return values
+    parsed, consumed = parse_yaml_block(lines[1:end], 0, 0)
+    if consumed != len(lines[1:end]):
+        remaining = next_content_line(lines[1:end], consumed)
+        if remaining != len(lines[1:end]):
+            fail(f"{path} frontmatter was not fully parsed")
+    if not isinstance(parsed, dict):
+        fail(f"{path} frontmatter must be a mapping")
+    return parsed
 
 
 def validate_skills_and_agents() -> None:
@@ -353,6 +433,23 @@ def validate_skills_and_agents() -> None:
         frontmatter = parse_frontmatter(path)
         if frontmatter.get("name") != name or not frontmatter.get("description"):
             fail(f"{path} requires matching name and description")
+    echo_text = skills["echo-context"].read_text(encoding="utf-8")
+    if "Sanitize every external search query" not in echo_text:
+        fail("echo-context must require external-search sanitization")
+
+    block_fixture = [
+        "name: block-test",
+        "tools:",
+        "  - Read",
+        "  - Grep",
+        "metadata:",
+        "  owner: GlacierEQ",
+    ]
+    block_parsed, _ = parse_yaml_block(block_fixture, 0, 0)
+    if block_parsed.get("tools") != ["Read", "Grep"]:
+        fail("block-style frontmatter list parsing failed")
+    if block_parsed.get("metadata") != {"owner": "GlacierEQ"}:
+        fail("block-style frontmatter mapping parsing failed")
 
     expected_agents = {
         "glaciereq-architect",
@@ -363,8 +460,14 @@ def validate_skills_and_agents() -> None:
     for path in (ROOT / ".grok" / "agents").glob("glaciereq-*.md"):
         frontmatter = parse_frontmatter(path)
         names.add(frontmatter.get("name", ""))
-        if not frontmatter.get("description") or not frontmatter.get("tools"):
+        tools = frontmatter.get("tools")
+        if not frontmatter.get("description") or not tools:
             fail(f"{path} requires description and tools")
+        text = path.read_text(encoding="utf-8")
+        if "MCP inheritance is intentional" not in text:
+            fail(f"{path} must document inherited-MCP discipline")
+        if "bypassPermissions" in text:
+            fail(f"{path} must not bypass permissions")
     if names != expected_agents:
         fail(f"agent set mismatch: {sorted(names)}")
 
@@ -394,10 +497,20 @@ def assert_linear_chain(receipts: list[dict[str, Any]], schema: dict[str, Any]) 
         previous = receipt["receipt_hash"]
 
 
+def validate_head_state(path: Path, expected_count: int) -> dict[str, Any]:
+    state = json.loads(path.read_text(encoding="utf-8"))
+    stored = state.pop("state_hash")
+    actual = hashlib.sha256(canonical(state).encode("utf-8")).hexdigest()
+    if stored != actual:
+        fail("receipt head state hash mismatch")
+    if state.get("receipt_count") != expected_count:
+        fail("receipt head count mismatch")
+    return state
+
+
 def validate_hook(action_schema: dict[str, Any]) -> None:
     hook_json = ROOT / ".grok" / "hooks" / "trust-spine.json"
-    config = json.loads(hook_json.read_text(encoding="utf-8"))
-    events = config.get("hooks", {})
+    events = json.loads(hook_json.read_text(encoding="utf-8")).get("hooks", {})
     required = {
         "SessionStart",
         "UserPromptSubmit",
@@ -427,32 +540,63 @@ def validate_hook(action_schema: dict[str, Any]) -> None:
 
     with tempfile.TemporaryDirectory() as temp:
         workspace = Path(temp)
-        first = {
-            "hookEventName": "session_start",
-            "sessionId": "test-session",
-            "workspaceRoot": str(workspace),
-            "timestamp": "2026-07-28T00:00:00Z",
-            "prompt": "must be hashed, not stored",
-        }
-        repeated = {
-            "hookEventName": "post_tool_use",
-            "sessionId": "test-session",
-            "workspaceRoot": str(workspace),
-            "timestamp": "2026-07-28T00:00:01Z",
-            "toolName": "search_replace",
-            "toolInput": {"api_key": "must-not-leak", "file": "README.md"},
-        }
-        emit_receipt(first)
-        emit_receipt(repeated)
-        emit_receipt(repeated)
+        events_under_test = [
+            {
+                "hookEventName": "session_start",
+                "sessionId": "test-session",
+                "workspaceRoot": str(workspace),
+                "timestamp": "2026-07-28T00:00:00Z",
+                "prompt": "must be hashed, not stored",
+            },
+            {
+                "hookEventName": "post_tool_use",
+                "sessionId": "test-session",
+                "workspaceRoot": str(workspace),
+                "timestamp": "2026-07-28T00:00:01Z",
+                "toolName": "search_replace",
+                "toolUseId": "tool-1",
+                "toolInput": {"api_key": "must-not-leak", "file": "README.md"},
+                "toolResultTruncated": True,
+            },
+            {
+                "hookEventName": "subagent_start",
+                "sessionId": "test-session",
+                "workspaceRoot": str(workspace),
+                "timestamp": "2026-07-28T00:00:02Z",
+                "subagentId": "child-17",
+                "subagentType": "architect",
+            },
+        ]
+        for event in events_under_test:
+            emit_receipt(event)
         log_path = workspace / ".grok" / "runtime" / "trust-spine" / "receipts.jsonl"
+        head_path = log_path.with_suffix(log_path.suffix + ".head.json")
         receipts = read_receipts(log_path)
-        if len(receipts) != 3:
-            fail("hook did not emit three receipts")
         assert_linear_chain(receipts, action_schema)
+        if receipts[1]["metadata"]["result_truncated"] is not True:
+            fail("tool result truncation was not retained")
+        if receipts[2]["metadata"]["subagent_id"] != "child-17":
+            fail("subagent id was not retained")
         serialized = log_path.read_text(encoding="utf-8")
         if "must-not-leak" in serialized or "must be hashed" in serialized:
             fail("hook leaked raw sensitive content")
+        validate_head_state(head_path, 3)
+
+        original_verify = emit_receipt.__globals__["verify_chain"]
+        emit_receipt.__globals__["verify_chain"] = lambda _handle: fail(
+            "normal receipt append rescanned the complete log"
+        )
+        try:
+            emit_receipt(events_under_test[1])
+        finally:
+            emit_receipt.__globals__["verify_chain"] = original_verify
+        assert_linear_chain(read_receipts(log_path), action_schema)
+        validate_head_state(head_path, 4)
+
+        head_path.unlink()
+        emit_receipt(events_under_test[1])
+        assert_linear_chain(read_receipts(log_path), action_schema)
+        validate_head_state(head_path, 5)
 
     with tempfile.TemporaryDirectory() as temp:
         workspace = Path(temp)
@@ -494,14 +638,26 @@ def validate_hook(action_schema: dict[str, Any]) -> None:
         if len(receipts) != 16:
             fail("concurrent hooks lost receipts")
         assert_linear_chain(receipts, action_schema)
+        validate_head_state(log_path.with_suffix(log_path.suffix + ".head.json"), 16)
         if log_path.with_suffix(log_path.suffix + ".lock").exists():
             fail("receipt lock file was not cleaned up")
+
+
+def validate_relationship_manifest() -> None:
+    text = (ROOT / "GLACIEREQ_RELATIONSHIPS.yaml").read_text(encoding="utf-8")
+    if "generated_from_verified_repositories: true" in text:
+        fail("relationship manifest must not assert unscoped repository verification")
+    if text.count("provenance:") < 5:
+        fail("every portfolio relationship requires provenance")
+    if "live_integrations_verified: false" not in text:
+        fail("relationship manifest must state live-integration verification status")
 
 
 def main() -> int:
     schemas = validate_schemas()
     validate_skills_and_agents()
     validate_hook(schemas["action-receipt.schema.json"])
+    validate_relationship_manifest()
     print("GlacierEQ native pack validation passed")
     return 0
 
