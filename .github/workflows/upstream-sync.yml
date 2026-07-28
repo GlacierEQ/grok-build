@@ -1,0 +1,142 @@
+name: Sync upstream Grok Build
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 16 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: grok-build-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out GlacierEQ main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "GlacierEQ Upstream Sync"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream https://github.com/xai-org/grok-build.git
+          git fetch origin main upstream/main || true
+          git fetch upstream main
+
+      - name: Advance exact upstream mirror
+        id: mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_sha="$(git rev-parse upstream/main)"
+          short_sha="${upstream_sha:0:12}"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          git push origin "$upstream_sha:refs/heads/upstream/main" --force
+
+          if git merge-base --is-ancestor "$upstream_sha" origin/main; then
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build reviewable sync branch
+        if: steps.mirror.outputs.needs_sync == 'true'
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="sync/upstream-${{ steps.mirror.outputs.short_sha }}"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "$branch"
+            git switch --detach "origin/$branch"
+            echo "existing=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git switch -c "$branch" origin/main
+          if ! git merge --no-edit "${{ steps.mirror.outputs.upstream_sha }}"; then
+            git merge --abort || true
+            gh issue create \
+              --title "Upstream sync conflict: ${{ steps.mirror.outputs.short_sha }}" \
+              --body "Automated merge of xai-org/grok-build into GlacierEQ main produced conflicts. Resolve from upstream commit `${{ steps.mirror.outputs.upstream_sha }}` while preserving intentional downstream changes."
+            exit 1
+          fi
+
+          git push --set-upstream origin "$branch"
+          echo "existing=false" >> "$GITHUB_OUTPUT"
+
+      - name: Install DotSlash
+        if: steps.mirror.outputs.needs_sync == 'true'
+        run: cargo install dotslash --locked
+
+      - name: Validate merged downstream
+        if: steps.mirror.outputs.needs_sync == 'true'
+        id: validate
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all -- --check
+          cargo check -p xai-grok-pager-bin
+          cargo test -p xai-grok-config
+
+      - name: Open or refresh upstream sync pull request
+        if: steps.mirror.outputs.needs_sync == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="${{ steps.merge.outputs.branch }}"
+          existing="$(gh pr list --base main --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          validation="${{ steps.validate.outcome }}"
+
+          body=$(cat <<EOF
+          ## Upstream synchronization
+
+          - Upstream repository: \`xai-org/grok-build\`
+          - Upstream commit: \`${{ steps.mirror.outputs.upstream_sha }}\`
+          - Mirror branch: \`upstream/main\`
+          - Merge branch: \`$branch\`
+          - Automated validation: **$validation**
+
+          This merge preserves GlacierEQ downstream commits while incorporating the current upstream source. Review conflict resolutions and downstream behavior before merging.
+          EOF
+          )
+
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body "$body"
+          elif [ "$validation" = "success" ]; then
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "chore: sync Grok Build upstream ${{ steps.mirror.outputs.short_sha }}" \
+              --body "$body"
+          else
+            gh pr create \
+              --draft \
+              --base main \
+              --head "$branch" \
+              --title "chore: sync Grok Build upstream ${{ steps.mirror.outputs.short_sha }}" \
+              --body "$body"
+          fi
+
+      - name: Fail when validation failed
+        if: steps.mirror.outputs.needs_sync == 'true' && steps.validate.outcome != 'success'
+        run: exit 1
