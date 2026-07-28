@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://glaciereq.dev/schemas/action-receipt.schema.json",
+  "title": "GlacierEQ Action Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "event_name",
+    "timestamp",
+    "session_id",
+    "workspace",
+    "payload_hash",
+    "parent_hash",
+    "receipt_hash"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "receipt_id": { "type": "string", "pattern": "^grx_[a-f0-9]{24}$" },
+    "event_name": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "session_id": { "type": "string" },
+    "workspace": { "type": "string" },
+    "permission_mode": { "type": ["string", "null"] },
+    "tool_name": { "type": ["string", "null"] },
+    "status": { "type": ["string", "null"] },
+    "payload_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "parent_hash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+    "receipt_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number", "integer", "boolean", "null"]
+      }
+    }
+  }
+}
