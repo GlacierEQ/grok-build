@@ -38,7 +38,7 @@
     "updated_at": { "type": ["string", "null"], "format": "date-time" },
     "dependencies": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true
     },
     "artifacts": {
@@ -70,7 +70,7 @@
     },
     "open_questions": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": { "type": "string", "minLength": 1 }
     }
   }
 }
