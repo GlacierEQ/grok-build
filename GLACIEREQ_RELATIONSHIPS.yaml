@@ -1,0 +1,71 @@
+schema_version: 1
+repository:
+  id: GlacierEQ/grok-build
+  role: writable-grok-agent-runtime
+  upstream: xai-org/grok-build
+  branch_contract:
+    product: main
+    upstream_mirror: upstream/main
+custom_pack:
+  name: echo-trust-holograph
+  phase: v1-native-extension
+  components:
+    - echo-context-fabric
+    - trust-spine
+    - repo-holograph
+capabilities:
+  - mcp-client-host
+  - persistent-memory
+  - subagent-orchestration
+  - background-workflows
+  - acp-agent-transport
+  - voice-dictation
+relationships:
+  - repository: GlacierEQ/apex-control-plane
+    relation: governance-and-receipt-patterns
+    integration_status: design-source
+    provenance:
+      repository_id: 1251740621
+      ref: main
+      source_path: README.md
+      source_blob_sha: bb63905c8c4e5639ea897787dffa66054d283f51
+      observed_at: 2026-07-28
+  - repository: GlacierEQ/token_saver
+    relation: hashed-context-pointers-and-cache
+    integration_status: adapter-planned
+    provenance:
+      repository_id: 1277329786
+      ref: main
+      source_path: README.md
+      source_blob_sha: 12e623193cd5f547c99151cfa95cfd41d92c00e6
+      observed_at: 2026-07-28
+  - repository: GlacierEQ/grokodile
+    relation: grok-native-operator-bridge
+    integration_status: scaffold
+    provenance:
+      repository_id: 1303650146
+      ref: main
+      source_path: README.md
+      source_blob_sha: 8e1613d4967b5eeb24a2583c36f4ee044424feb1
+      observed_at: 2026-07-28
+  - repository: GlacierEQ/apex-fs-commander-unified
+    relation: local-filesystem-mcp
+    integration_status: available-external
+    provenance:
+      repository_id: 1304467510
+      ref: main
+      source_path: README.md
+      source_blob_sha: 37cc5d2d8dbcc63c56c3093c6c1285814c52cdf2
+      observed_at: 2026-07-28
+  - repository: GlacierEQ/FILEBOSS
+    relation: file-and-artifact-intelligence
+    integration_status: adapter-planned
+    provenance:
+      repository_id: 1001146377
+      ref: main
+      source_kind: repository-metadata
+      observed_at: 2026-07-28
+truth:
+  relationships_have_durable_provenance: true
+  live_integrations_verified: false
+  unverified_live_integrations_claimed: false

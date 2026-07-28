@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://glaciereq.dev/schemas/action-receipt.schema.json",
+  "title": "GlacierEQ Action Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "event_name",
+    "timestamp",
+    "session_id",
+    "workspace",
+    "payload_hash",
+    "parent_hash",
+    "receipt_hash",
+    "metadata"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "receipt_id": { "type": "string", "pattern": "^grx_[a-f0-9]{24}$" },
+    "event_name": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "session_id": { "type": "string" },
+    "workspace": { "type": "string" },
+    "permission_mode": { "type": ["string", "null"] },
+    "tool_name": { "type": ["string", "null"] },
+    "status": { "type": ["string", "null"] },
+    "payload_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "parent_hash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+    "receipt_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_use_id",
+        "input_truncated",
+        "result_truncated",
+        "subagent_id",
+        "subagent_type",
+        "source"
+      ],
+      "properties": {
+        "tool_use_id": { "type": ["string", "null"] },
+        "input_truncated": { "type": "boolean" },
+        "result_truncated": { "type": "boolean" },
+        "subagent_id": { "type": ["string", "null"] },
+        "subagent_type": { "type": ["string", "null"] },
+        "source": { "const": "grok-project-hook" }
+      }
+    }
+  }
+}

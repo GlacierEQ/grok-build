@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://glaciereq.dev/schemas/memory-record.schema.json",
+  "title": "GlacierEQ Memory Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "source",
+    "scope",
+    "statement_class",
+    "content",
+    "content_hash",
+    "observed_at",
+    "confidence",
+    "sensitivity"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "record_id": { "type": "string", "minLength": 1 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "uri"],
+      "properties": {
+        "system": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "artifact_hash": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "scope": {
+      "enum": ["global", "workspace", "project", "case", "session", "person"]
+    },
+    "statement_class": {
+      "enum": [
+        "verified_fact",
+        "user_recollection",
+        "allegation",
+        "model_inference",
+        "recommendation",
+        "procedural_state",
+        "open_question"
+      ]
+    },
+    "content": { "type": "string", "minLength": 1 },
+    "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "effective_at": { "type": ["string", "null"], "format": "date-time" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "sensitivity": {
+      "enum": ["public", "internal", "confidential", "restricted"]
+    },
+    "supersedes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "contradicts": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    }
+  }
+}

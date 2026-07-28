@@ -1,0 +1,114 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,pathlib,runpy,sys; e=json.load(sys.stdin); p=pathlib.Path(e.get(\"workspaceRoot\") or e.get(\"cwd\") or \".\").resolve()/\".grok/hooks/trust-spine.py\"; runpy.run_path(str(p))[\"emit_receipt\"](e)'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
