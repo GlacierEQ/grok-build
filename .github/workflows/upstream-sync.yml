@@ -95,12 +95,7 @@ jobs:
         if: steps.mirror.outputs.needs_sync == 'true'
         id: validate
         continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo fmt --all -- --check
-          cargo check --locked -p xai-grok-pager-bin
-          cargo test --locked -p xai-grok-config
+        run: bash scripts/glaciereq-validate.sh
 
       - name: Open or refresh upstream sync pull request
         if: steps.mirror.outputs.needs_sync == 'true'
