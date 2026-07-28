@@ -41,17 +41,5 @@ jobs:
           cargo install dotslash --locked
           /usr/bin/env dotslash --help
 
-      - name: Verify locked dependency graph
-        run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check composition-root binary
-        run: cargo check --locked -p xai-grok-pager-bin
-
-      - name: Test configuration subsystem
-        run: cargo test --locked -p xai-grok-config
-
-      - name: Clippy composition-root binary
-        run: cargo clippy --locked -p xai-grok-pager-bin --all-targets -- -D warnings
+      - name: Run strict shared validation
+        run: bash scripts/glaciereq-validate.sh
