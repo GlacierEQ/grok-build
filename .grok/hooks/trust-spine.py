@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit a privacy-preserving, hash-chained GlacierEQ action receipt."""
+"""Emit privacy-preserving, hash-chained GlacierEQ action receipts."""
 
 from __future__ import annotations
 
@@ -35,10 +35,11 @@ RAW_PAYLOAD_KEYS = {
 MAX_SCALAR_LENGTH = 256
 LOCK_TIMEOUT_SECS = 5.0
 STALE_LOCK_SECS = 60.0
+HEAD_SCHEMA_VERSION = 1
 
 
 class ChainIntegrityError(RuntimeError):
-    """Raised when an existing receipt log cannot be verified end to end."""
+    """Raised when receipt state cannot be verified safely."""
 
 
 def canonical(value: Any) -> bytes:
@@ -70,6 +71,10 @@ def scrub(value: Any, key: str = "") -> Any:
 
 def optional_string(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def load_event() -> dict[str, Any]:
@@ -104,8 +109,7 @@ def exclusive_lock(path: Path) -> Iterator[None]:
             os.fsync(descriptor)
         except FileExistsError:
             try:
-                age = time.time() - path.stat().st_mtime
-                if age > STALE_LOCK_SECS:
+                if time.time() - path.stat().st_mtime > STALE_LOCK_SECS:
                     path.unlink()
                     continue
             except FileNotFoundError:
@@ -126,11 +130,31 @@ def exclusive_lock(path: Path) -> Iterator[None]:
             pass
 
 
-def verify_chain(handle: Any) -> str | None:
-    """Verify every existing record and return the final receipt hash."""
+def verify_receipt(item: Any, expected_parent: str | None = None) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ChainIntegrityError("receipt is not an object")
+    if expected_parent is not None and item.get("parent_hash") != expected_parent:
+        raise ChainIntegrityError("receipt parent hash mismatch")
+    stored_hash = item.get("receipt_hash")
+    if not isinstance(stored_hash, str) or len(stored_hash) != 64:
+        raise ChainIntegrityError("invalid receipt hash")
+    core = dict(item)
+    core.pop("receipt_hash", None)
+    if sha256(core) != stored_hash:
+        raise ChainIntegrityError("receipt hash mismatch")
+    receipt_id = item.get("receipt_id")
+    if not isinstance(receipt_id, str) or not receipt_id.startswith("grx_"):
+        raise ChainIntegrityError("invalid receipt id")
+    return item
+
+
+def verify_chain(handle: Any) -> tuple[str | None, str | None, int]:
+    """Perform a full chain verification for recovery and explicit auditing."""
 
     handle.seek(0)
     previous: str | None = None
+    last_id: str | None = None
+    count = 0
     seen_ids: set[str] = set()
     for line_number, line in enumerate(handle, start=1):
         if not line.endswith("\n"):
@@ -143,23 +167,117 @@ def verify_chain(handle: Any) -> str | None:
             raise ChainIntegrityError(
                 f"malformed receipt JSON at line {line_number}"
             ) from error
-        if not isinstance(item, dict):
-            raise ChainIntegrityError(f"non-object receipt at line {line_number}")
         if item.get("parent_hash") != previous:
             raise ChainIntegrityError(f"parent hash mismatch at line {line_number}")
-        stored_hash = item.get("receipt_hash")
-        if not isinstance(stored_hash, str) or len(stored_hash) != 64:
-            raise ChainIntegrityError(f"invalid receipt hash at line {line_number}")
-        core = dict(item)
-        core.pop("receipt_hash", None)
-        if sha256(core) != stored_hash:
-            raise ChainIntegrityError(f"receipt hash mismatch at line {line_number}")
-        receipt_id = item.get("receipt_id")
-        if not isinstance(receipt_id, str) or receipt_id in seen_ids:
-            raise ChainIntegrityError(f"duplicate or invalid receipt id at line {line_number}")
+        verify_receipt(item)
+        receipt_id = item["receipt_id"]
+        if receipt_id in seen_ids:
+            raise ChainIntegrityError(f"duplicate receipt id at line {line_number}")
         seen_ids.add(receipt_id)
-        previous = stored_hash
-    return previous
+        previous = item["receipt_hash"]
+        last_id = receipt_id
+        count += 1
+    return previous, last_id, count
+
+
+def read_last_receipt(path: Path) -> dict[str, Any] | None:
+    """Read only the final complete JSONL record."""
+
+    size = path.stat().st_size
+    if size == 0:
+        return None
+    with path.open("rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        if handle.read(1) != b"\n":
+            raise ChainIntegrityError("receipt log ends with a partial line")
+        position = size - 2
+        while position >= 0:
+            handle.seek(position)
+            if handle.read(1) == b"\n":
+                position += 1
+                break
+            position -= 1
+        if position < 0:
+            position = 0
+        handle.seek(position)
+        raw = handle.read(size - position).rstrip(b"\n")
+    try:
+        return verify_receipt(json.loads(raw.decode("utf-8")))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ChainIntegrityError("malformed final receipt") from error
+
+
+def head_hash(state: dict[str, Any]) -> str:
+    core = dict(state)
+    core.pop("state_hash", None)
+    return sha256(core)
+
+
+def load_head(path: Path) -> dict[str, Any] | None:
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(state, dict) or state.get("schema_version") != HEAD_SCHEMA_VERSION:
+        return None
+    if state.get("state_hash") != head_hash(state):
+        return None
+    return state
+
+
+def write_head(path: Path, state: dict[str, Any]) -> None:
+    state = dict(state)
+    state["state_hash"] = head_hash(state)
+    temp = path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def recover_head(handle: Any, log_path: Path, head_path: Path) -> dict[str, Any]:
+    final_hash, receipt_id, count = verify_chain(handle)
+    state = {
+        "schema_version": HEAD_SCHEMA_VERSION,
+        "log_size": log_path.stat().st_size,
+        "receipt_count": count,
+        "head_hash": final_hash,
+        "receipt_id": receipt_id,
+        "updated_at": utc_now(),
+    }
+    write_head(head_path, state)
+    return state
+
+
+def current_head(handle: Any, log_path: Path, head_path: Path) -> dict[str, Any]:
+    """Validate the compact head and tail; full-scan only for recovery."""
+
+    size = log_path.stat().st_size
+    state = load_head(head_path)
+    if state is None or state.get("log_size") != size:
+        return recover_head(handle, log_path, head_path)
+    if size == 0:
+        if state.get("head_hash") is not None or state.get("receipt_count") != 0:
+            return recover_head(handle, log_path, head_path)
+        return state
+    tail = read_last_receipt(log_path)
+    if tail is None:
+        return recover_head(handle, log_path, head_path)
+    if tail.get("receipt_hash") != state.get("head_hash"):
+        return recover_head(handle, log_path, head_path)
+    if tail.get("receipt_id") != state.get("receipt_id"):
+        return recover_head(handle, log_path, head_path)
+    return state
 
 
 def build_receipt(event: dict[str, Any], parent_hash: str | None) -> dict[str, Any]:
@@ -170,10 +288,7 @@ def build_receipt(event: dict[str, Any], parent_hash: str | None) -> dict[str, A
         or event.get("event")
         or "unknown"
     )
-    timestamp = str(
-        event.get("timestamp")
-        or dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    )
+    timestamp = str(event.get("timestamp") or utc_now())
     status = event.get("status") or event.get("outcome") or event.get("errorType")
     core: dict[str, Any] = {
         "schema_version": 1,
@@ -190,6 +305,10 @@ def build_receipt(event: dict[str, Any], parent_hash: str | None) -> dict[str, A
         "metadata": {
             "tool_use_id": optional_string(event.get("toolUseId")),
             "input_truncated": bool(event.get("toolInputTruncated", False)),
+            "result_truncated": bool(
+                event.get("toolResultTruncated", event.get("toolOutputTruncated", False))
+            ),
+            "subagent_id": optional_string(event.get("subagentId")),
             "subagent_type": optional_string(event.get("subagentType")),
             "source": "grok-project-hook",
         },
@@ -199,20 +318,30 @@ def build_receipt(event: dict[str, Any], parent_hash: str | None) -> dict[str, A
 
 
 def emit_receipt(event: dict[str, Any]) -> dict[str, Any]:
-    """Verify the existing chain, append one receipt, and return it."""
+    """Append one receipt after constant-time head/tail validation."""
 
     path = receipt_path(event)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
+    head_path = path.with_suffix(path.suffix + ".head.json")
 
     with exclusive_lock(lock_path):
         with path.open("a+", encoding="utf-8") as handle:
-            parent = verify_chain(handle)
-            receipt = build_receipt(event, parent)
+            state = current_head(handle, path, head_path)
+            receipt = build_receipt(event, state.get("head_hash"))
             handle.seek(0, os.SEEK_END)
             handle.write(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+            next_state = {
+                "schema_version": HEAD_SCHEMA_VERSION,
+                "log_size": path.stat().st_size,
+                "receipt_count": int(state.get("receipt_count", 0)) + 1,
+                "head_hash": receipt["receipt_hash"],
+                "receipt_id": receipt["receipt_id"],
+                "updated_at": utc_now(),
+            }
+            write_head(head_path, next_state)
     return receipt
 
 
