@@ -1,0 +1,41 @@
+schema_version: 1
+repository:
+  id: GlacierEQ/grok-build
+  role: writable-grok-agent-runtime
+  upstream: xai-org/grok-build
+  branch_contract:
+    product: main
+    upstream_mirror: upstream/main
+custom_pack:
+  name: echo-trust-holograph
+  phase: v1-native-extension
+  components:
+    - echo-context-fabric
+    - trust-spine
+    - repo-holograph
+capabilities:
+  - mcp-client-host
+  - persistent-memory
+  - subagent-orchestration
+  - background-workflows
+  - acp-agent-transport
+  - voice-dictation
+relationships:
+  - repository: GlacierEQ/apex-control-plane
+    relation: governance-and-receipt-patterns
+    integration_status: design-source
+  - repository: GlacierEQ/token_saver
+    relation: hashed-context-pointers-and-cache
+    integration_status: adapter-planned
+  - repository: GlacierEQ/grokodile
+    relation: grok-native-operator-bridge
+    integration_status: scaffold
+  - repository: GlacierEQ/apex-fs-commander-unified
+    relation: local-filesystem-mcp
+    integration_status: available-external
+  - repository: GlacierEQ/FILEBOSS
+    relation: file-and-artifact-intelligence
+    integration_status: adapter-planned
+truth:
+  generated_from_verified_repositories: true
+  unverified_live_integrations_claimed: false
