@@ -17,8 +17,9 @@ Construct the smallest context package that preserves the evidence needed to con
 
 1. State the current objective and the decision or artifact this context must support.
 2. Search local project memory and repository sources before asking the user to repeat information.
-3. Prefer exact source pointers, hashes, file paths, commit SHAs, docket identifiers, or connector record IDs over copied bulk text.
-4. Classify every substantive statement as one of:
+3. Sanitize every external search query before `web_search`: remove credentials, secrets, private repository content, personal identifiers, case-sensitive details, and unnecessary objective text. Search only the minimum public-safe terms needed. When sanitization would destroy the query's meaning, do not send it externally.
+4. Prefer exact source pointers, hashes, file paths, commit SHAs, docket identifiers, or connector record IDs over copied bulk text.
+5. Classify every substantive statement as one of:
    - `verified_fact`
    - `user_recollection`
    - `allegation`
@@ -26,11 +27,11 @@ Construct the smallest context package that preserves the evidence needed to con
    - `recommendation`
    - `procedural_state`
    - `open_question`
-5. Preserve contradictions. Never silently replace one statement with another.
-6. Deduplicate exact content by SHA-256 and semantic duplicates by retaining the strongest source plus aliases.
-7. Keep secrets and raw credentials out of memory.
-8. Emit records compatible with `glaciereq/schemas/memory-record.schema.json`.
-9. Finish with:
+6. Preserve contradictions. Never silently replace one statement with another.
+7. Deduplicate exact content by SHA-256 and semantic duplicates by retaining the strongest source plus aliases.
+8. Keep secrets and raw credentials out of memory.
+9. Emit records compatible with `glaciereq/schemas/memory-record.schema.json`.
+10. Finish with:
    - objective;
    - decisive context;
    - source pointers;
