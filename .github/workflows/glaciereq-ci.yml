@@ -1,0 +1,57 @@
+name: GlacierEQ downstream validation
+
+on:
+  push:
+    branches:
+      - main
+      - "feature/**"
+      - "fix/**"
+      - "integration/**"
+      - "sync/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: glaciereq-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show pinned Rust toolchain
+        run: |
+          rustup show
+          rustc --version
+          cargo --version
+
+      - name: Install DotSlash
+        run: |
+          cargo install dotslash --locked
+          /usr/bin/env dotslash --help
+
+      - name: Verify locked dependency graph
+        run: cargo metadata --locked --no-deps --format-version 1 >/dev/null
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check composition-root binary
+        run: cargo check --locked -p xai-grok-pager-bin
+
+      - name: Test configuration subsystem
+        run: cargo test --locked -p xai-grok-config
+
+      - name: Clippy composition-root binary
+        run: cargo clippy --locked -p xai-grok-pager-bin --all-targets -- -D warnings
