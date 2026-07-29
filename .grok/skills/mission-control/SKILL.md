@@ -42,7 +42,14 @@ Use the executable control plane rather than keeping a multi-step mission only i
    ```
 
 6. Repair failures and rerun verification. Do not relabel a failed check as skipped merely to reach completion.
-7. Resolve every open question through a journaled transition rather than editing mission JSON:
+7. When a mission enters `blocked`, stop mutation and run the explicit transition only after the blocker is cleared:
+
+   ```bash
+   python3 scripts/glaciereq-mission.py resume <mission-id>
+   ```
+
+   A blocked mission rejects artifact recording, question resolution, criterion satisfaction, verification, and completion until it is resumed.
+8. Resolve every open question through a journaled transition rather than editing mission JSON:
 
    ```bash
    python3 scripts/glaciereq-mission.py resolve-question <mission-id> \
@@ -51,7 +58,7 @@ Use the executable control plane rather than keeping a multi-step mission only i
    ```
 
    The event stores hashes of the question and answer, not the raw answer.
-8. Explicitly satisfy each completion criterion with an evidence reference:
+9. Explicitly satisfy each completion criterion with an evidence reference:
 
    ```bash
    python3 scripts/glaciereq-mission.py satisfy-criterion <mission-id> \
@@ -60,13 +67,13 @@ Use the executable control plane rather than keeping a multi-step mission only i
    ```
 
    Criterion evidence is hash-recorded in the event journal. Prose criteria alone never produce completion.
-9. Run a deep integrity audit for consequential missions:
+10. Run a deep integrity audit for consequential missions:
 
    ```bash
    python3 scripts/glaciereq-mission.py audit <mission-id> --deep
    ```
 
-10. Complete only through the gate:
+11. Complete only through the gate:
 
    ```bash
    python3 scripts/glaciereq-mission.py complete <mission-id>
@@ -81,6 +88,7 @@ Use the executable control plane rather than keeping a multi-step mission only i
 - Verification output is bounded and hashed while the process runs; raw stdout and stderr are not persisted.
 - Treat `declared`, `available`, and `verified` connector status as different facts.
 - Use `block --reason` when a real dependency prevents progress, and `resume` when it is cleared.
+- Blocked is a real stop state: do not mutate or verify the mission until the journaled `resume` transition succeeds.
 - Never manually edit `mission.json` or `events.jsonl`; state changes outside the journal are rejected.
 - Mission runtime state is local and ignored by Git; durable product changes, schemas, documentation, and source remain in the repository.
 - Never claim complete when the mission gate returns a blocker or failed required check.
