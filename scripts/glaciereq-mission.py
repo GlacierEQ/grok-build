@@ -167,23 +167,53 @@ def mission_paths(root: Path, mission_id: str) -> dict[str, Path]:
     }
 
 
-def atomic_write_json(path: Path, value: Any) -> None:
+def fsync_directory(directory: Path) -> None:
+    """Persist a directory entry on platforms that support directory fsync."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
+        if error.errno in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(
         f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     )
-    payload = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     try:
-        with temporary.open("x", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise MissionError(f"failed writing temporary file: {temporary}")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         os.replace(temporary, path)
+        fsync_directory(path.parent)
     finally:
         try:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    payload = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    atomic_write_bytes(path, payload.encode("utf-8"))
 
 
 def process_alive(pid: int) -> bool:
@@ -234,6 +264,7 @@ def exclusive_lock(
             descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.write(descriptor, canonical(owner))
             os.fsync(descriptor)
+            fsync_directory(path.parent)
         except FileExistsError:
             try:
                 age = time.time() - path.stat().st_mtime
@@ -244,6 +275,7 @@ def exclusive_lock(
             if not owner_is_live and age > STALE_LOCK_SECONDS:
                 try:
                     path.unlink()
+                    fsync_directory(path.parent)
                 except FileNotFoundError:
                     pass
                 continue
@@ -262,6 +294,7 @@ def exclusive_lock(
             current_pid, current_token = read_lock_owner(path)
             if current_pid == os.getpid() and current_token == token:
                 path.unlink()
+                fsync_directory(path.parent)
         except FileNotFoundError:
             pass
 
@@ -365,6 +398,18 @@ def compute_event_hash(event: dict[str, Any]) -> str:
     return hash_value(core)
 
 
+def event_line(event: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            event,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 def validate_event(
     event: Any,
     expected_parent: str | None,
@@ -402,8 +447,7 @@ def validate_event(
     validate_hash(event["event_hash"], "mission event hash")
     if event["event_hash"] != compute_event_hash(event):
         raise MissionError("mission event hash mismatch")
-    state_hash = metadata.get("state_hash")
-    validate_hash(state_hash, "mission event state hash")
+    validate_hash(metadata.get("state_hash"), "mission event state hash")
     return event
 
 
@@ -439,11 +483,18 @@ def append_event(path: Path, event: dict[str, Any], mission_id: str) -> None:
     expected_parent = events[-1]["event_hash"] if events else None
     validate_event(event, expected_parent, mission_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    try:
+        remaining = memoryview(event_line(event))
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise MissionError("failed appending mission event")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    fsync_directory(path.parent)
 
 
 def make_event(
@@ -473,6 +524,23 @@ def make_event(
     return event
 
 
+def repair_torn_event_tail(path: Path, pending_event: dict[str, Any]) -> None:
+    """Remove only a partial tail proven to be a prefix of the pending event."""
+
+    if not path.exists():
+        return
+    raw = path.read_bytes()
+    if not raw or raw.endswith(b"\n"):
+        return
+    prefix_end = raw.rfind(b"\n") + 1
+    prefix = raw[:prefix_end]
+    tail = raw[prefix_end:]
+    expected = event_line(pending_event)[:-1]
+    if not expected.startswith(tail):
+        raise MissionError("torn journal tail does not match the pending transaction")
+    atomic_write_bytes(path, prefix)
+
+
 def recover_pending(paths: dict[str, Path]) -> None:
     pending_path = paths["pending"]
     if not pending_path.exists():
@@ -485,20 +553,25 @@ def recover_pending(paths: dict[str, Path]) -> None:
         raise MissionError("invalid pending mission transaction")
     state = normalize_state(transaction["state"])
     event = transaction["event"]
-    events = read_events(paths["events"], state["mission_id"])
-    parent = events[-1]["event_hash"] if events else None
     validate_event(event, event.get("parent_hash"), state["mission_id"])
     if event["metadata"].get("state_hash") != hash_value(state):
         raise MissionError("pending transaction state hash mismatch")
+    repair_torn_event_tail(paths["events"], event)
+    events = read_events(paths["events"], state["mission_id"])
+    parent = events[-1]["event_hash"] if events else None
     matching = [item for item in events if item["event_id"] == event["event_id"]]
     if not matching:
         if event["parent_hash"] != parent:
             raise MissionError("pending transaction parent no longer matches journal")
         append_event(paths["events"], event, state["mission_id"])
-    elif events[-1]["event_id"] != event["event_id"]:
+    elif (
+        events[-1]["event_id"] != event["event_id"]
+        or events[-1]["event_hash"] != event["event_hash"]
+    ):
         raise MissionError("pending transaction event is not the journal head")
     atomic_write_json(paths["state"], state)
     pending_path.unlink()
+    fsync_directory(pending_path.parent)
 
 
 def assert_state_matches_journal(
@@ -534,7 +607,11 @@ def commit_locked(
     if events:
         if not paths["state"].exists():
             raise MissionError("mission journal exists without state")
-        current = normalize_state(json.loads(paths["state"].read_text(encoding="utf-8")))
+        try:
+            current_raw = json.loads(paths["state"].read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise MissionError("mission state became invalid JSON") from error
+        current = normalize_state(current_raw)
         current_hash = hash_value(current)
         if events[-1]["metadata"].get("state_hash") != current_hash:
             raise MissionError("mission state changed outside the event journal")
@@ -553,6 +630,7 @@ def commit_locked(
     append_event(paths["events"], event, state["mission_id"])
     atomic_write_json(paths["state"], state)
     paths["pending"].unlink()
+    fsync_directory(paths["pending"].parent)
     return event
 
 
@@ -756,7 +834,7 @@ def create_mission(
 
 
 def reject_mutation_status(state: dict[str, Any], operation: str) -> None:
-    if state["status"] in {"complete", "cancelled", "verifying"}:
+    if state["status"] in {"blocked", "complete", "cancelled", "verifying"}:
         raise MissionError(f"cannot {operation} mission in status {state['status']}")
 
 
@@ -903,7 +981,9 @@ def run_check(
                 subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             )
             try:
-                process = subprocess.Popen(
+                # The command is an explicit operator-authored argv contract. It is
+                # parsed without a shell; shell metacharacters/substitution are rejected.
+                process = subprocess.Popen(  # nosec B603
                     argv,
                     cwd=root,
                     shell=False,
@@ -938,6 +1018,8 @@ def run_check(
             stderr_handle.flush()
             stdout_size = os.fstat(stdout_handle.fileno()).st_size
             stderr_size = os.fstat(stderr_handle.fileno()).st_size
+            if stdout_size + stderr_size > MAX_EVIDENCE_BYTES:
+                output_limit_exceeded = True
     except MissionError as error:
         launch_error_type = error.__class__.__name__
     except Exception as error:  # preserve a terminal failed result for unexpected runtime faults
@@ -1011,7 +1093,7 @@ def verify_mission(
     run_id = f"mvr_{secrets.token_hex(12)}"
     with exclusive_lock(paths["lock"]):
         state, baseline_hash, _ = load_locked_state(root_path, mission_id, paths)
-        if state["status"] in {"complete", "cancelled", "verifying"}:
+        if state["status"] in {"blocked", "complete", "cancelled", "verifying"}:
             raise MissionError(f"cannot verify mission in status {state['status']}")
         snapshot = artifact_snapshot_hash(state)
         for check in state["verification"]:
@@ -1181,10 +1263,25 @@ def load_consistent_dependency(root: Path, mission_id: str) -> dict[str, Any]:
     return state
 
 
+def latest_block_reference(events: list[dict[str, Any]]) -> str | None:
+    for event in reversed(events):
+        if event["event_type"] == "mission_resumed":
+            return None
+        if event["event_type"] == "mission_blocked":
+            metadata = event["metadata"]
+            value = metadata.get("reason_hash") or metadata.get("blockers_hash")
+            return str(value) if value else event["event_hash"]
+    return None
+
+
 def completion_blockers(
     root: Path, state: dict[str, Any], events: list[dict[str, Any]]
 ) -> list[str]:
     blockers: list[str] = []
+    if state["status"] == "blocked":
+        reference = latest_block_reference(events)
+        suffix = f" ({reference})" if reference else ""
+        blockers.append(f"mission is blocked; run resume before completing{suffix}")
     required_artifacts = [item for item in state["artifacts"] if item["required"]]
     required_checks = [item for item in state["verification"] if item["required"]]
     if not required_artifacts and not required_checks:
@@ -1239,6 +1336,8 @@ def complete_mission(
         if state["status"] in {"complete", "cancelled", "verifying"}:
             raise MissionError(f"cannot complete mission in status {state['status']}")
         blockers = completion_blockers(root_path, state, events)
+        if state["status"] == "blocked":
+            return state, blockers
         state["updated_at"] = utc_now()
         if blockers:
             state["status"] = "blocked"
