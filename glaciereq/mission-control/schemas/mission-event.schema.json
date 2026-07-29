@@ -27,6 +27,8 @@
         "artifacts_recorded",
         "verification_started",
         "verification_finished",
+        "criterion_satisfied",
+        "question_resolved",
         "mission_completed",
         "mission_blocked",
         "mission_resumed",
