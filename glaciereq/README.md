@@ -24,7 +24,7 @@ No Rust behavior is replaced in the current slices. Future Rust changes should e
 
 Trust Spine writes receipts beneath `.grok/runtime/trust-spine/`. Mission Control writes mission state, verification evidence metadata, transaction recovery files, and event journals beneath `.grok/runtime/missions/`. Runtime files are intentionally ignored by Git.
 
-Trust Spine avoids storing raw prompts, tool inputs, tool outputs, or secrets. Mission verification streams stdout and stderr into temporary files while enforcing a size limit, then stores command hashes, executable names, exit status, byte counts, output hashes, process-failure metadata, and an evidence-file hash. Raw stdout and stderr are deleted rather than persisted.
+Trust Spine avoids storing raw prompts, tool inputs, tool outputs, or secrets. Mission verification streams stdout and stderr through bounded pipe readers that count and hash output without retaining the raw bytes. On timeout or output overflow, the entire isolated process group is terminated. Evidence stores command hashes, executable names, exit status, byte counts, output hashes, process-failure metadata, artifact-state identity, and an evidence-file hash.
 
 ## Contracts
 
@@ -72,9 +72,15 @@ python3 scripts/glaciereq-mission.py resolve-question example-mission \
   --answer "resolved answer or disposition"
 ```
 
+When a mission becomes `blocked`, it rejects artifact recording, question resolution, criterion satisfaction, verification, and completion until the blocker is cleared and the explicit transition succeeds:
+
+```bash
+python3 scripts/glaciereq-mission.py resume example-mission
+```
+
 The answer and criterion evidence are hash-recorded; raw text is not copied into event metadata. Do not manually edit `mission.json` or `events.jsonl`: the engine compares state to the journal head before every mutation and rejects out-of-band changes.
 
-Verification commands execute directly with `shell=False`; pipelines and compound shell expressions must be split into separate checks. A changed artifact invalidates prior verification, and completion rechecks artifact and evidence integrity without replacing the verified hashes.
+Verification commands execute directly with `shell=False`; pipelines and compound shell expressions must be split into separate checks. A changed artifact invalidates prior verification and criterion satisfaction, and completion rechecks artifact and evidence integrity without replacing the verified hashes.
 
 ## Validation
 
@@ -82,5 +88,6 @@ Validate the native pack and Mission Control with:
 
 ```bash
 python3 scripts/validate-glaciereq-pack.py
+python3 scripts/validate-mission-permissions.py
 python3 scripts/validate-mission-control.py
 ```
