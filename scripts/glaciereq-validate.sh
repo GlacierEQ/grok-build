@@ -2,6 +2,7 @@
 set -euo pipefail
 
 python3 scripts/validate-glaciereq-pack.py
+python3 scripts/validate-mission-control.py
 cargo metadata --locked --no-deps --format-version 1 >/dev/null
 cargo fmt --all -- --check
 cargo check --locked -p xai-grok-pager-bin
