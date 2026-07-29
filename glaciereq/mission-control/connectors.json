@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-28T22:50:14Z",
+  "policy": {
+    "default_deny_unlisted": true,
+    "permissions_enforced": true,
+    "mutation_receipts_required": true,
+    "live_status_must_be_evidenced": true
+  },
+  "connectors": [
+    {
+      "id": "github",
+      "server_names": ["github"],
+      "role": "source control, review, CI, and repository mutation",
+      "capabilities": [
+        "repository.read",
+        "repository.write",
+        "pull_request.manage",
+        "workflow.inspect"
+      ],
+      "operations": ["read", "write"],
+      "live_status": "declared",
+      "evidence": null
+    },
+    {
+      "id": "supermemory",
+      "server_names": ["supermemory"],
+      "role": "durable cross-session memory and retrieval",
+      "capabilities": ["memory.search", "memory.write", "memory.link"],
+      "operations": ["read", "write"],
+      "live_status": "declared",
+      "evidence": null
+    },
+    {
+      "id": "notion",
+      "server_names": ["notion"],
+      "role": "structured knowledge, plans, and operating records",
+      "capabilities": ["knowledge.search", "page.read", "page.write"],
+      "operations": ["read", "write"],
+      "live_status": "declared",
+      "evidence": null
+    },
+    {
+      "id": "google-drive",
+      "server_names": ["google_drive"],
+      "role": "cloud document and artifact storage",
+      "capabilities": ["file.search", "file.read", "file.write"],
+      "operations": ["read", "write"],
+      "live_status": "declared",
+      "evidence": null
+    },
+    {
+      "id": "dropbox",
+      "server_names": ["dropbox"],
+      "role": "cloud file retrieval, preservation, and delivery",
+      "capabilities": ["file.search", "file.read", "file.write"],
+      "operations": ["read", "write"],
+      "live_status": "declared",
+      "evidence": null
+    },
+    {
+      "id": "filesystem",
+      "server_names": ["filesystem"],
+      "role": "operator-local filesystem access",
+      "capabilities": ["file.read", "file.write", "directory.manage"],
+      "operations": ["read", "write"],
+      "live_status": "declared",
+      "evidence": null
+    },
+    {
+      "id": "fileboss",
+      "server_names": ["fileboss"],
+      "role": "evidence-aware file organization and artifact assembly",
+      "capabilities": [
+        "file.classify",
+        "artifact.assemble",
+        "manifest.write",
+        "hash.verify"
+      ],
+      "operations": ["read", "write", "execute"],
+      "live_status": "declared",
+      "evidence": null
+    }
+  ]
+}
