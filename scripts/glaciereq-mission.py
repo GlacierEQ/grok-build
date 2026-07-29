@@ -23,9 +23,9 @@ import shlex
 import signal
 import subprocess
 import sys
-import tempfile
+import threading
 import time
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 
 MISSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 EVENT_ID_RE = re.compile(r"^mse_[a-f0-9]{24}$")
@@ -62,11 +62,7 @@ STATE_REQUIRED = {
     "artifacts",
     "verification",
 }
-STATE_ALLOWED = STATE_REQUIRED | {
-    "updated_at",
-    "dependencies",
-    "open_questions",
-}
+STATE_ALLOWED = STATE_REQUIRED | {"updated_at", "dependencies", "open_questions"}
 ARTIFACT_REQUIRED = {"path", "required"}
 ARTIFACT_ALLOWED = ARTIFACT_REQUIRED | {"hash"}
 VERIFICATION_REQUIRED = {"command", "required"}
@@ -87,6 +83,7 @@ LOCK_TIMEOUT_SECONDS = 10.0
 STALE_LOCK_SECONDS = 60.0
 MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 HASH_CHUNK_BYTES = 1024 * 1024
+PIPE_CHUNK_BYTES = 64 * 1024
 POLL_INTERVAL_SECONDS = 0.05
 SHELL_TOKENS = {"|", "||", "&&", ";", ">", ">>", "<", "<<"}
 
@@ -123,10 +120,7 @@ def hash_value(value: Any) -> str:
 def hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(HASH_CHUNK_BYTES)
-            if not chunk:
-                break
+        while chunk := handle.read(HASH_CHUNK_BYTES):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -168,7 +162,7 @@ def mission_paths(root: Path, mission_id: str) -> dict[str, Path]:
 
 
 def fsync_directory(directory: Path) -> None:
-    """Persist a directory entry on platforms that support directory fsync."""
+    """Persist a directory entry where the platform supports directory fsync."""
 
     if os.name == "nt":
         return
@@ -193,12 +187,12 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
     try:
         descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            view = memoryview(payload)
-            while view:
-                written = os.write(descriptor, view)
+            remaining = memoryview(payload)
+            while remaining:
+                written = os.write(descriptor, remaining)
                 if written <= 0:
                     raise MissionError(f"failed writing temporary file: {temporary}")
-                view = view[written:]
+                remaining = remaining[written:]
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -527,18 +521,40 @@ def make_event(
 def repair_torn_event_tail(path: Path, pending_event: dict[str, Any]) -> None:
     """Remove only a partial tail proven to be a prefix of the pending event."""
 
-    if not path.exists():
+    if not path.exists() or path.stat().st_size == 0:
         return
-    raw = path.read_bytes()
-    if not raw or raw.endswith(b"\n"):
-        return
-    prefix_end = raw.rfind(b"\n") + 1
-    prefix = raw[:prefix_end]
-    tail = raw[prefix_end:]
     expected = event_line(pending_event)[:-1]
+    with path.open("rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        if handle.read(1) == b"\n":
+            return
+        position = handle.tell()
+        collected = bytearray()
+        prefix_end = 0
+        while position >= 0:
+            start = max(0, position - HASH_CHUNK_BYTES + 1)
+            handle.seek(start)
+            chunk = handle.read(position - start + 1)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                collected[:0] = chunk[newline + 1 :]
+                prefix_end = start + newline + 1
+                break
+            collected[:0] = chunk
+            if len(collected) > len(expected):
+                raise MissionError("torn journal tail exceeds the pending event length")
+            if start == 0:
+                prefix_end = 0
+                break
+            position = start - 1
+    tail = bytes(collected)
     if not expected.startswith(tail):
         raise MissionError("torn journal tail does not match the pending transaction")
-    atomic_write_bytes(path, prefix)
+    with path.open("r+b") as handle:
+        handle.truncate(prefix_end)
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_directory(path.parent)
 
 
 def recover_pending(paths: dict[str, Path]) -> None:
@@ -668,10 +684,9 @@ def hash_artifact(path: Path) -> str | None:
                 if item.is_symlink():
                     raise MissionError(f"artifact directory contains symlink: {item}")
                 relative = item.relative_to(path).as_posix().encode("utf-8")
-                file_hash = hash_file(item).encode("ascii")
                 digest.update(len(relative).to_bytes(8, "big"))
                 digest.update(relative)
-                digest.update(file_hash)
+                digest.update(hash_file(item).encode("ascii"))
         return digest.hexdigest()
     raise MissionError(f"unsupported artifact type: {path}")
 
@@ -895,8 +910,8 @@ def parse_command(command: str) -> list[str]:
 
 
 def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+    """Terminate a verifier and sweep surviving descendants from its process group."""
+
     if os.name == "posix":
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -904,23 +919,62 @@ def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
             return
         try:
             process.wait(timeout=1)
-            return
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
-    else:
-        process.terminate()
+            pass
+        # Always attempt SIGKILL after the grace period. The leader may have exited
+        # while a descendant in the same group ignored SIGTERM.
         try:
-            process.wait(timeout=1)
-            return
-        except subprocess.TimeoutExpired:
-            process.kill()
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired as error:
         raise MissionError("verification process group could not be terminated") from error
+
+
+class StreamDigest:
+    """Hash and count a subprocess stream without retaining its content."""
+
+    def __init__(
+        self,
+        stream: BinaryIO,
+        shared_total: list[int],
+        shared_lock: threading.Lock,
+        limit_event: threading.Event,
+    ) -> None:
+        self.stream = stream
+        self.shared_total = shared_total
+        self.shared_lock = shared_lock
+        self.limit_event = limit_event
+        self.digest = hashlib.sha256()
+        self.byte_count = 0
+        self.error_type: str | None = None
+
+    def run(self) -> None:
+        try:
+            while chunk := self.stream.read(PIPE_CHUNK_BYTES):
+                self.digest.update(chunk)
+                self.byte_count += len(chunk)
+                with self.shared_lock:
+                    self.shared_total[0] += len(chunk)
+                    if self.shared_total[0] > MAX_EVIDENCE_BYTES:
+                        self.limit_event.set()
+        except Exception as error:  # convert reader faults into failed evidence
+            self.error_type = error.__class__.__name__
+            self.limit_event.set()
+        finally:
+            try:
+                self.stream.close()
+            except OSError:
+                pass
 
 
 def write_evidence_record(
@@ -936,10 +990,6 @@ def write_evidence_record(
     atomic_write_json(path, evidence)
     relative = path.relative_to(root).as_posix()
     return f"{relative}#{hash_file(path)}"
-
-
-def empty_hash() -> str:
-    return hashlib.sha256(b"").hexdigest()
 
 
 def run_check(
@@ -960,85 +1010,76 @@ def run_check(
     launch_error_type: str | None = None
     launch_errno: int | None = None
     internal_error_type: str | None = None
-    stdout_path: Path | None = None
-    stderr_path: Path | None = None
-    stdout_size = 0
-    stderr_size = 0
-    stdout_hash = empty_hash()
-    stderr_hash = empty_hash()
+    stdout_count = 0
+    stderr_count = 0
+    stdout_hash = hashlib.sha256(b"").hexdigest()
+    stderr_hash = hashlib.sha256(b"").hexdigest()
 
-    evidence_dir.mkdir(parents=True, exist_ok=True)
     try:
         argv = parse_command(command)
-        with tempfile.NamedTemporaryFile(
-            mode="w+b", prefix="stdout-", dir=evidence_dir, delete=False
-        ) as stdout_handle, tempfile.NamedTemporaryFile(
-            mode="w+b", prefix="stderr-", dir=evidence_dir, delete=False
-        ) as stderr_handle:
-            stdout_path = Path(stdout_handle.name)
-            stderr_path = Path(stderr_handle.name)
-            creationflags = (
-                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-            )
-            try:
-                # The command is an explicit operator-authored argv contract. It is
-                # parsed without a shell; shell metacharacters/substitution are rejected.
-                process = subprocess.Popen(  # nosec B603
-                    argv,
-                    cwd=root,
-                    shell=False,
-                    stdout=stdout_handle,
-                    stderr=stderr_handle,
-                    start_new_session=os.name == "posix",
-                    creationflags=creationflags,
-                )
-            except OSError as error:
-                launch_error_type = error.__class__.__name__
-                launch_errno = error.errno
-            if process is not None:
-                deadline = time.monotonic() + timeout
-                while process.poll() is None:
-                    stdout_handle.flush()
-                    stderr_handle.flush()
-                    stdout_size = os.fstat(stdout_handle.fileno()).st_size
-                    stderr_size = os.fstat(stderr_handle.fileno()).st_size
-                    if stdout_size + stderr_size > MAX_EVIDENCE_BYTES:
-                        output_limit_exceeded = True
-                        terminate_process_group(process)
-                        break
-                    if time.monotonic() >= deadline:
-                        timed_out = True
-                        terminate_process_group(process)
-                        break
-                    time.sleep(POLL_INTERVAL_SECONDS)
-                if process.poll() is None:
-                    terminate_process_group(process)
-                return_code = process.wait()
-            stdout_handle.flush()
-            stderr_handle.flush()
-            stdout_size = os.fstat(stdout_handle.fileno()).st_size
-            stderr_size = os.fstat(stderr_handle.fileno()).st_size
-            if stdout_size + stderr_size > MAX_EVIDENCE_BYTES:
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        # This argv is an explicit operator-authored mission contract. It is parsed
+        # without a shell, and shell substitution/metacharacter operators are rejected.
+        process = subprocess.Popen(  # nosec B603
+            argv,
+            cwd=root,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=os.name == "posix",
+            creationflags=creationflags,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise MissionError("verification process pipes were not created")
+        shared_total = [0]
+        shared_lock = threading.Lock()
+        limit_event = threading.Event()
+        stdout_reader = StreamDigest(
+            process.stdout, shared_total, shared_lock, limit_event
+        )
+        stderr_reader = StreamDigest(
+            process.stderr, shared_total, shared_lock, limit_event
+        )
+        stdout_thread = threading.Thread(target=stdout_reader.run, daemon=True)
+        stderr_thread = threading.Thread(target=stderr_reader.run, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            if limit_event.is_set():
                 output_limit_exceeded = True
+                terminate_process_group(process)
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                terminate_process_group(process)
+                break
+            time.sleep(POLL_INTERVAL_SECONDS)
+        if process.poll() is None:
+            terminate_process_group(process)
+        return_code = process.wait()
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        if stdout_thread.is_alive() or stderr_thread.is_alive():
+            internal_error_type = "StreamReaderTimeout"
+        if stdout_reader.error_type or stderr_reader.error_type:
+            internal_error_type = (
+                stdout_reader.error_type or stderr_reader.error_type
+            )
+        output_limit_exceeded = output_limit_exceeded or limit_event.is_set()
+        stdout_count = stdout_reader.byte_count
+        stderr_count = stderr_reader.byte_count
+        stdout_hash = stdout_reader.digest.hexdigest()
+        stderr_hash = stderr_reader.digest.hexdigest()
+    except OSError as error:
+        launch_error_type = error.__class__.__name__
+        launch_errno = error.errno
     except MissionError as error:
         launch_error_type = error.__class__.__name__
-    except Exception as error:  # preserve a terminal failed result for unexpected runtime faults
+    except Exception as error:
         internal_error_type = error.__class__.__name__
-        if process is not None and process.poll() is None:
+        if process is not None:
             terminate_process_group(process)
-    finally:
-        if stdout_path is not None and stdout_path.exists():
-            stdout_size = stdout_path.stat().st_size
-            stdout_hash = hash_file(stdout_path)
-        if stderr_path is not None and stderr_path.exists():
-            stderr_size = stderr_path.stat().st_size
-            stderr_hash = hash_file(stderr_path)
-        for path in (stdout_path, stderr_path):
-            if path is not None:
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
 
     finished = utc_now()
     passed = (
@@ -1064,9 +1105,9 @@ def run_check(
         "launch_error_type": launch_error_type,
         "launch_errno": launch_errno,
         "internal_error_type": internal_error_type,
-        "stdout_bytes": stdout_size,
+        "stdout_bytes": stdout_count,
         "stdout_sha256": stdout_hash,
-        "stderr_bytes": stderr_size,
+        "stderr_bytes": stderr_count,
         "stderr_sha256": stderr_hash,
         "raw_output_stored": False,
     }
@@ -1199,6 +1240,7 @@ def satisfy_criterion(
                 "criterion_index": index,
                 "criterion_hash": hash_value(criterion),
                 "evidence_hash": hash_value(evidence),
+                "artifact_state_hash": artifact_snapshot_hash(state),
             },
             baseline_hash,
         )
@@ -1242,15 +1284,18 @@ def satisfied_criteria(
     state: dict[str, Any], events: list[dict[str, Any]]
 ) -> set[int]:
     satisfied: set[int] = set()
+    current_artifact_state = artifact_snapshot_hash(state)
     for event in events:
         if event["event_type"] != "criterion_satisfied":
             continue
-        index = event["metadata"].get("criterion_index")
-        criterion_hash = event["metadata"].get("criterion_hash")
+        metadata = event["metadata"]
+        index = metadata.get("criterion_index")
         if (
             isinstance(index, int)
             and 0 <= index < len(state["completion_contract"])
-            and criterion_hash == hash_value(state["completion_contract"][index])
+            and metadata.get("criterion_hash")
+            == hash_value(state["completion_contract"][index])
+            and metadata.get("artifact_state_hash") == current_artifact_state
         ):
             satisfied.add(index)
     return satisfied
