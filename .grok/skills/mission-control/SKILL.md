@@ -16,7 +16,7 @@ Use the executable control plane rather than keeping a multi-step mission only i
 
 ## Procedure
 
-1. Define an objective and explicit completion criteria.
+1. Define an objective, explicit completion criteria, and at least one required artifact or required verification gate.
 2. Create the mission before consequential implementation begins:
 
    ```bash
@@ -34,6 +34,7 @@ Use the executable control plane rather than keeping a multi-step mission only i
    python3 scripts/glaciereq-mission.py record-artifacts <mission-id>
    ```
 
+   Any artifact change invalidates prior verification evidence.
 5. Execute declared verification checks:
 
    ```bash
@@ -41,24 +42,45 @@ Use the executable control plane rather than keeping a multi-step mission only i
    ```
 
 6. Repair failures and rerun verification. Do not relabel a failed check as skipped merely to reach completion.
-7. Complete only through the gate:
+7. Resolve every open question through a journaled transition rather than editing mission JSON:
 
    ```bash
-   python3 scripts/glaciereq-mission.py complete <mission-id>
+   python3 scripts/glaciereq-mission.py resolve-question <mission-id> \
+     --index <zero-based-index> \
+     --answer "<answer or disposition>"
    ```
 
-   Completion is refused when a required artifact is missing, a required check has not passed, a dependency is incomplete, or an open question remains.
-8. Run a deep integrity audit for consequential missions:
+   The event stores hashes of the question and answer, not the raw answer.
+8. Explicitly satisfy each completion criterion with an evidence reference:
+
+   ```bash
+   python3 scripts/glaciereq-mission.py satisfy-criterion <mission-id> \
+     --index <zero-based-index> \
+     --evidence "<artifact, receipt, check, audit, or source reference>"
+   ```
+
+   Criterion evidence is hash-recorded in the event journal. Prose criteria alone never produce completion.
+9. Run a deep integrity audit for consequential missions:
 
    ```bash
    python3 scripts/glaciereq-mission.py audit <mission-id> --deep
    ```
 
+10. Complete only through the gate:
+
+   ```bash
+   python3 scripts/glaciereq-mission.py complete <mission-id>
+   ```
+
+   Completion is refused when an artifact is unrecorded or drifted, required evidence is invalid, a required check has not passed, a criterion is unsatisfied, a dependency is incomplete, or an open question remains.
+
 ## Operating rules
 
-- Keep credentials and secrets out of objectives, command arguments, evidence, and mission state.
+- Keep credentials and secrets out of objectives, command arguments, evidence references, and mission state.
 - Split pipelines and compound shell expressions into separate verification entries; checks execute without a shell.
+- Verification output is bounded and hashed while the process runs; raw stdout and stderr are not persisted.
 - Treat `declared`, `available`, and `verified` connector status as different facts.
 - Use `block --reason` when a real dependency prevents progress, and `resume` when it is cleared.
+- Never manually edit `mission.json` or `events.jsonl`; state changes outside the journal are rejected.
 - Mission runtime state is local and ignored by Git; durable product changes, schemas, documentation, and source remain in the repository.
 - Never claim complete when the mission gate returns a blocker or failed required check.
