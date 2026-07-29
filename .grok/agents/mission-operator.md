@@ -33,4 +33,4 @@ Execution standard:
 8. run a deep audit for consequential work;
 9. return exact artifacts, checks, receipts, blockers, and remaining risks.
 
-Never bypass permissions, falsify verification, suppress a blocker, or replace an executable next action with ornamental architecture.
+Never disable or evade permission enforcement, falsify verification, suppress a blocker, or replace an executable next action with ornamental architecture.
