@@ -81,6 +81,14 @@ def load_schemas() -> dict[str, dict[str, Any]]:
     return loaded
 
 
+def expect_assertion(callable_value: Callable[[], Any], label: str) -> None:
+    try:
+        callable_value()
+    except AssertionError:
+        return
+    fail(f"{label}: expected schema validation failure")
+
+
 def validate_registry(schema: dict[str, Any]) -> set[str]:
     path = ROOT / "glaciereq" / "mission-control" / "connectors.json"
     registry = json.loads(path.read_text(encoding="utf-8"))
@@ -98,10 +106,21 @@ def validate_registry(schema: dict[str, Any]) -> set[str]:
         if overlap:
             fail(f"connector server names are not unique: {sorted(overlap)}")
         server_names.update(connector["server_names"])
-        if connector["live_status"] in {"available", "verified"} and not connector["evidence"]:
-            fail(f"{connector['id']} claims live status without evidence")
-        if connector["live_status"] == "declared" and connector["evidence"] is not None:
-            fail(f"{connector['id']} declared status must not imply live evidence")
+        evidence = connector["evidence"]
+        if not isinstance(evidence, str) or not evidence:
+            fail(f"{connector['id']} has no status evidence")
+        if connector["live_status"] == "declared":
+            if not evidence.startswith("declaration:"):
+                fail(f"{connector['id']} declaration evidence is ambiguous")
+        elif evidence.startswith("declaration:"):
+            fail(f"{connector['id']} claims live status using declaration-only evidence")
+    invalid = json.loads(json.dumps(registry))
+    invalid["connectors"][0]["live_status"] = "verified"
+    invalid["connectors"][0]["evidence"] = None
+    expect_assertion(
+        lambda: validate_instance(invalid, schema),
+        "live connector with null evidence",
+    )
     required = {
         "github",
         "supermemory",
@@ -204,6 +223,7 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
     satisfy_criterion = module["satisfy_criterion"]
     resolve_question = module["resolve_question"]
     complete_mission = module["complete_mission"]
+    resume_mission = module["resume_mission"]
     audit_mission = module["audit_mission"]
     load_state = module["load_state"]
     normalize_state = module["normalize_state"]
@@ -214,6 +234,10 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
     exclusive_lock = module["exclusive_lock"]
     load_locked_state = module["load_locked_state"]
     commit_locked = module["commit_locked"]
+    make_event = module["make_event"]
+    event_line = module["event_line"]
+    atomic_write_json = module["atomic_write_json"]
+    recover_pending = module["recover_pending"]
     main_cli = module["main"]
     mission_schema = json.loads(
         (ROOT / "glaciereq" / "schemas" / "mission-contract.schema.json").read_text(
@@ -288,6 +312,24 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
             fail("unsatisfied completion criteria did not block completion")
         if not any("open question" in item for item in blockers):
             fail("open question did not block completion")
+        expect_mission_error(
+            lambda: resolve_question(
+                root, "success-path", 0, "Deep integrity audit", "validator"
+            ),
+            "blocked question resolution",
+        )
+        expect_mission_error(
+            lambda: verify_mission(root, "success-path", "validator", timeout=30),
+            "blocked verification",
+        )
+        still_blocked, blocked_again = complete_mission(
+            root, "success-path", "validator"
+        )
+        if still_blocked["status"] != "blocked" or not any(
+            "run resume" in item for item in blocked_again
+        ):
+            fail("blocked mission did not require resume")
+        resume_mission(root, "success-path", "validator")
 
         state = resolve_question(
             root, "success-path", 0, "Deep integrity audit", "validator"
@@ -465,6 +507,47 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
 
         create_mission(
             root,
+            "torn-recovery",
+            "Recover a pending event after a partial append",
+            ["Journal recovers"],
+            artifacts=["drift.txt"],
+            actor="validator",
+        )
+        torn_paths = mission_paths(root, "torn-recovery")
+        with exclusive_lock(torn_paths["lock"]):
+            torn_state, _, torn_events = load_locked_state(
+                root, "torn-recovery", torn_paths
+            )
+            torn_state["updated_at"] = module["utc_now"]()
+            metadata = {
+                "deep": False,
+                "state_hash": module["hash_value"](torn_state),
+            }
+            pending_event = make_event(
+                "torn-recovery",
+                "mission_audited",
+                "validator",
+                metadata,
+                torn_events[-1]["event_hash"],
+            )
+            atomic_write_json(
+                torn_paths["pending"],
+                {"state": torn_state, "event": pending_event},
+            )
+            serialized = event_line(pending_event)
+            with torn_paths["events"].open("ab") as handle:
+                handle.write(serialized[: len(serialized) // 2])
+                handle.flush()
+                os.fsync(handle.fileno())
+            recover_pending(torn_paths)
+        recovered_events = read_events(torn_paths["events"], "torn-recovery")
+        if recovered_events[-1]["event_id"] != pending_event["event_id"]:
+            fail("pending transaction did not repair the torn journal tail")
+        if torn_paths["pending"].exists():
+            fail("recovered pending transaction was not cleared")
+
+        create_mission(
+            root,
             "already-verifying",
             "Reject concurrent verification runs",
             ["Only one run executes"],
@@ -563,6 +646,8 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
         "assert_state_matches_journal",
         "validate_evidence_reference",
         "output_limit_exceeded",
+        "fsync_directory",
+        "repair_torn_event_tail",
     ):
         if token not in source:
             fail(f"mission engine lost hardening mechanism: {token}")
