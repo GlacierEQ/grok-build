@@ -7,7 +7,7 @@ This directory defines the portable contracts shared by the GlacierEQ customizat
 - **Echo Context Fabric** — compact, provenance-aware memory and continuation records.
 - **Trust Spine** — append-only, SHA-256 hash-chained action receipts emitted by project hooks.
 - **Repo Holograph** — a machine-readable map connecting this repository to the wider GlacierEQ system.
-- **Mission Control Plane** — durable mission contracts, executable verification, artifact hashing, connector capability declarations, completion gates, and hash-linked mission events.
+- **Mission Control Plane** — durable mission contracts, bounded executable verification, streaming artifact hashing, connector capability declarations, explicit criterion satisfaction, completion gates, and hash-linked mission events.
 
 ## Native extension surfaces
 
@@ -24,7 +24,7 @@ No Rust behavior is replaced in the current slices. Future Rust changes should e
 
 Trust Spine writes receipts beneath `.grok/runtime/trust-spine/`. Mission Control writes mission state, verification evidence metadata, transaction recovery files, and event journals beneath `.grok/runtime/missions/`. Runtime files are intentionally ignored by Git.
 
-Trust Spine avoids storing raw prompts, tool inputs, tool outputs, or secrets. Mission verification stores command hashes, executable names, exit status, byte counts, and output hashes; raw stdout and stderr are not persisted.
+Trust Spine avoids storing raw prompts, tool inputs, tool outputs, or secrets. Mission verification streams stdout and stderr into temporary files while enforcing a size limit, then stores command hashes, executable names, exit status, byte counts, output hashes, process-failure metadata, and an evidence-file hash. Raw stdout and stderr are deleted rather than persisted.
 
 ## Contracts
 
@@ -49,16 +49,32 @@ Create and execute a durable mission with:
 ```bash
 python3 scripts/glaciereq-mission.py init example-mission \
   --objective "Produce and verify the requested artifact" \
-  --criterion "Required artifact exists" \
+  --criterion "Required artifact exists and is verified" \
   --artifact "path/to/artifact" \
   --verification "python3 scripts/validate-mission-control.py"
+
 python3 scripts/glaciereq-mission.py record-artifacts example-mission
 python3 scripts/glaciereq-mission.py verify example-mission
-python3 scripts/glaciereq-mission.py complete example-mission
 python3 scripts/glaciereq-mission.py audit example-mission --deep
+
+python3 scripts/glaciereq-mission.py satisfy-criterion example-mission \
+  --index 0 \
+  --evidence "artifact hash + verification evidence + audit event"
+
+python3 scripts/glaciereq-mission.py complete example-mission
 ```
 
-Verification commands execute directly with `shell=False`; pipelines and compound shell expressions must be split into separate checks.
+A mission initialized with `--question` must resolve it through the journaled command:
+
+```bash
+python3 scripts/glaciereq-mission.py resolve-question example-mission \
+  --index 0 \
+  --answer "resolved answer or disposition"
+```
+
+The answer and criterion evidence are hash-recorded; raw text is not copied into event metadata. Do not manually edit `mission.json` or `events.jsonl`: the engine compares state to the journal head before every mutation and rejects out-of-band changes.
+
+Verification commands execute directly with `shell=False`; pipelines and compound shell expressions must be split into separate checks. A changed artifact invalidates prior verification, and completion rechecks artifact and evidence integrity without replacing the verified hashes.
 
 ## Validation
 
