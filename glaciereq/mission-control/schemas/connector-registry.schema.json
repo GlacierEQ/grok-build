@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://glaciereq.dev/schemas/connector-registry.schema.json",
+  "title": "GlacierEQ Connector Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "policy", "connectors"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default_deny_unlisted",
+        "permissions_enforced",
+        "mutation_receipts_required",
+        "live_status_must_be_evidenced"
+      ],
+      "properties": {
+        "default_deny_unlisted": { "const": true },
+        "permissions_enforced": { "const": true },
+        "mutation_receipts_required": { "const": true },
+        "live_status_must_be_evidenced": { "const": true }
+      }
+    },
+    "connectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "server_names",
+          "role",
+          "capabilities",
+          "operations",
+          "live_status",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{1,63}$"
+          },
+          "server_names": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "role": { "type": "string", "minLength": 1 },
+          "capabilities": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "enum": ["read", "write", "execute", "admin"] }
+          },
+          "live_status": {
+            "enum": ["declared", "available", "verified", "unavailable"]
+          },
+          "evidence": { "type": ["string", "null"], "minLength": 1 }
+        }
+      }
+    }
+  }
+}
