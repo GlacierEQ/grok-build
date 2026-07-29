@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://glaciereq.dev/schemas/mission-event.schema.json",
+  "title": "GlacierEQ Mission Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "mission_id",
+    "event_type",
+    "timestamp",
+    "actor",
+    "metadata",
+    "details_hash",
+    "parent_hash",
+    "event_hash"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": { "type": "string", "pattern": "^mse_[a-f0-9]{24}$" },
+    "mission_id": { "type": "string", "minLength": 1 },
+    "event_type": {
+      "enum": [
+        "mission_created",
+        "status_changed",
+        "artifacts_recorded",
+        "verification_started",
+        "verification_finished",
+        "mission_completed",
+        "mission_blocked",
+        "mission_resumed",
+        "mission_audited"
+      ]
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "actor": { "type": "string", "minLength": 1 },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean", "null"]
+      }
+    },
+    "details_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "parent_hash": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "event_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}
