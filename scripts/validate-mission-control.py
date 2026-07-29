@@ -20,36 +20,24 @@ parse_frontmatter = BASE["parse_frontmatter"]
 validate_instance = BASE["validate_instance"]
 validate_schema_support = BASE["validate_schema_support"]
 
-SCHEMAS = {
+SCHEMA_CONTRACTS = {
     "connector-registry.schema.json": {
-        "required": {"schema_version", "generated_at", "policy", "connectors"},
-        "properties": {"schema_version", "generated_at", "policy", "connectors"},
+        "schema_version",
+        "generated_at",
+        "policy",
+        "connectors",
     },
     "mission-event.schema.json": {
-        "required": {
-            "schema_version",
-            "event_id",
-            "mission_id",
-            "event_type",
-            "timestamp",
-            "actor",
-            "metadata",
-            "details_hash",
-            "parent_hash",
-            "event_hash",
-        },
-        "properties": {
-            "schema_version",
-            "event_id",
-            "mission_id",
-            "event_type",
-            "timestamp",
-            "actor",
-            "metadata",
-            "details_hash",
-            "parent_hash",
-            "event_hash",
-        },
+        "schema_version",
+        "event_id",
+        "mission_id",
+        "event_type",
+        "timestamp",
+        "actor",
+        "metadata",
+        "details_hash",
+        "parent_hash",
+        "event_hash",
     },
 }
 
@@ -57,27 +45,27 @@ SCHEMAS = {
 def load_schemas() -> dict[str, dict[str, Any]]:
     directory = ROOT / "glaciereq" / "mission-control" / "schemas"
     found = {path.name for path in directory.glob("*.json")}
-    if found != set(SCHEMAS):
+    if found != set(SCHEMA_CONTRACTS):
         fail(f"mission-control schema set mismatch: {sorted(found)}")
     loaded: dict[str, dict[str, Any]] = {}
-    for name, contract in SCHEMAS.items():
+    for name, fields in SCHEMA_CONTRACTS.items():
         schema = json.loads((directory / name).read_text(encoding="utf-8"))
         validate_schema_support(schema)
         if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
             fail(f"{name} does not declare JSON Schema 2020-12")
         if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
-            fail(f"{name} must be a closed object contract")
-        if set(schema.get("required", [])) != contract["required"]:
+            fail(f"{name} must remain a closed object contract")
+        if set(schema.get("required", [])) != fields:
             fail(f"{name} required-field contract drifted")
-        if set(schema.get("properties", {})) != contract["properties"]:
+        if set(schema.get("properties", {})) != fields:
             fail(f"{name} property contract drifted")
         loaded[name] = schema
     event_types = set(
         loaded["mission-event.schema.json"]["properties"]["event_type"]["enum"]
     )
-    for required in {"criterion_satisfied", "question_resolved"}:
-        if required not in event_types:
-            fail(f"mission event contract lost {required}")
+    required_events = {"criterion_satisfied", "question_resolved"}
+    if not required_events.issubset(event_types):
+        fail("mission event contract lost criterion or question transitions")
     return loaded
 
 
@@ -90,12 +78,15 @@ def expect_assertion(callable_value: Callable[[], Any], label: str) -> None:
 
 
 def validate_registry(schema: dict[str, Any]) -> set[str]:
-    path = ROOT / "glaciereq" / "mission-control" / "connectors.json"
-    registry = json.loads(path.read_text(encoding="utf-8"))
+    registry = json.loads(
+        (ROOT / "glaciereq" / "mission-control" / "connectors.json").read_text(
+            encoding="utf-8"
+        )
+    )
     validate_instance(registry, schema)
-    policy = registry["policy"]
-    if not all(policy.values()):
+    if not all(registry["policy"].values()):
         fail("connector registry policy flags must remain enabled")
+
     identifiers: set[str] = set()
     server_names: set[str] = set()
     for connector in registry["connectors"]:
@@ -113,7 +104,8 @@ def validate_registry(schema: dict[str, Any]) -> set[str]:
             if not evidence.startswith("declaration:"):
                 fail(f"{connector['id']} declaration evidence is ambiguous")
         elif evidence.startswith("declaration:"):
-            fail(f"{connector['id']} claims live status using declaration-only evidence")
+            fail(f"{connector['id']} uses declaration-only evidence for live status")
+
     invalid = json.loads(json.dumps(registry))
     invalid["connectors"][0]["live_status"] = "verified"
     invalid["connectors"][0]["evidence"] = None
@@ -121,6 +113,7 @@ def validate_registry(schema: dict[str, Any]) -> set[str]:
         lambda: validate_instance(invalid, schema),
         "live connector with null evidence",
     )
+
     required = {
         "github",
         "supermemory",
@@ -145,10 +138,11 @@ def validate_native_surfaces(server_names: set[str]) -> None:
         "init",
         "record-artifacts",
         "verify",
+        "resume",
         "resolve-question",
         "satisfy-criterion",
-        "complete",
         "audit",
+        "complete",
     ):
         if f"glaciereq-mission.py {command}" not in skill_text:
             fail(f"mission-control skill is missing {command} procedure")
@@ -156,6 +150,7 @@ def validate_native_surfaces(server_names: set[str]) -> None:
         "This workflow is not read-only",
         "Prose criteria alone never produce completion",
         "Never manually edit `mission.json`",
+        "Blocked is a real stop state",
     ):
         if phrase not in skill_text:
             fail(f"mission-control skill lost policy: {phrase}")
@@ -189,7 +184,7 @@ def expect_mission_error(callable_value: Callable[[], Any], label: str) -> str:
     return ""
 
 
-def evidence_file(root: Path, reference: str) -> Path:
+def evidence_path(root: Path, reference: str) -> Path:
     path_text, separator, digest = reference.rpartition("#")
     if not separator or len(digest) != 64:
         fail("verification evidence reference is malformed")
@@ -201,18 +196,18 @@ def validate_event_journal(
 ) -> None:
     if not events:
         fail("mission event journal is empty")
-    previous = None
+    parent = None
     identifiers: set[str] = set()
     for index, event in enumerate(events):
         validate_instance(event, schema, f"event[{index}]")
         if event["mission_id"] != mission_id:
             fail("mission event references the wrong mission")
-        if event["parent_hash"] != previous:
+        if event["parent_hash"] != parent:
             fail("mission event chain is not linear")
         if event["event_id"] in identifiers:
             fail("mission event id was reused")
         identifiers.add(event["event_id"])
-        previous = event["event_hash"]
+        parent = event["event_hash"]
 
 
 def validate_engine(event_schema: dict[str, Any]) -> None:
@@ -239,12 +234,12 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
     atomic_write_json = module["atomic_write_json"]
     recover_pending = module["recover_pending"]
     main_cli = module["main"]
+
     mission_schema = json.loads(
         (ROOT / "glaciereq" / "schemas" / "mission-contract.schema.json").read_text(
             encoding="utf-8"
         )
     )
-
     executable = shlex.quote(sys.executable)
     passing = f'{executable} -c "import sys; print(\'verified-output\'); sys.exit(0)"'
     failing = f'{executable} -c "import sys; sys.exit(7)"'
@@ -265,8 +260,10 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
             "verification": [{"command": passing, "required": True}],
         }
     )
-    if minimal["updated_at"] is not None or minimal["dependencies"] or minimal["open_questions"]:
-        fail("runtime did not normalize optional mission fields")
+    if minimal["updated_at"] is not None:
+        fail("runtime did not normalize optional updated_at")
+    if minimal["dependencies"] or minimal["open_questions"]:
+        fail("runtime did not normalize optional arrays")
     if minimal["artifacts"][0]["hash"] is not None:
         fail("runtime did not normalize optional artifact hash")
     if minimal["verification"][0]["status"] != "pending":
@@ -297,19 +294,19 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
         reference = state["verification"][0]["evidence"]
         if not reference:
             fail("passing verification has no evidence reference")
-        evidence_path = evidence_file(root, reference)
-        evidence_original = evidence_path.read_bytes()
-        evidence = json.loads(evidence_original)
+        receipt = evidence_path(root, reference)
+        receipt_original = receipt.read_bytes()
+        evidence = json.loads(receipt_original)
         if evidence.get("raw_output_stored") is not False:
             fail("verification evidence must not store raw output")
-        if "verified-output" in evidence_path.read_text(encoding="utf-8"):
+        if "verified-output" in receipt.read_text(encoding="utf-8"):
             fail("verification evidence leaked raw stdout")
 
-        blocked_state, blockers = complete_mission(root, "success-path", "validator")
-        if blocked_state["status"] != "blocked" or not any(
-            "criterion" in item for item in blockers
-        ):
-            fail("unsatisfied completion criteria did not block completion")
+        blocked, blockers = complete_mission(root, "success-path", "validator")
+        if blocked["status"] != "blocked":
+            fail("unsatisfied mission did not enter blocked state")
+        if not any("criterion" in item for item in blockers):
+            fail("unsatisfied criteria did not block completion")
         if not any("open question" in item for item in blockers):
             fail("open question did not block completion")
         expect_mission_error(
@@ -319,15 +316,17 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
             "blocked question resolution",
         )
         expect_mission_error(
+            lambda: record_artifacts(root, "success-path", "validator"),
+            "blocked artifact recording",
+        )
+        expect_mission_error(
             lambda: verify_mission(root, "success-path", "validator", timeout=30),
             "blocked verification",
         )
-        still_blocked, blocked_again = complete_mission(
-            root, "success-path", "validator"
-        )
-        if still_blocked["status"] != "blocked" or not any(
-            "run resume" in item for item in blocked_again
-        ):
+        still_blocked, blocked_again = complete_mission(root, "success-path", "validator")
+        if still_blocked["status"] != "blocked":
+            fail("blocked mission changed status without resume")
+        if not any("run resume" in item for item in blocked_again):
             fail("blocked mission did not require resume")
         resume_mission(root, "success-path", "validator")
 
@@ -364,19 +363,18 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
         validate_event_journal(events, event_schema, "success-path")
         validate_instance(load_state(root, "success-path"), mission_schema)
 
-        evidence_path.write_text('{"tampered":true}\n', encoding="utf-8")
+        receipt.write_text('{"tampered":true}\n', encoding="utf-8")
         expect_mission_error(
             lambda: audit_mission(root, "success-path", "validator"),
             "evidence tamper audit",
         )
-        evidence_path.write_bytes(evidence_original)
+        receipt.write_bytes(receipt_original)
         artifact.write_bytes(b"artifact drift\n")
         expect_mission_error(
             lambda: audit_mission(root, "success-path", "validator", deep=True),
             "artifact drift audit",
         )
-        terminal_state = load_state(root, "success-path")
-        if terminal_state["status"] != "complete":
+        if load_state(root, "success-path")["status"] != "complete":
             fail("terminal mission was downgraded after drift")
 
         drift_artifact = root / "drift.txt"
@@ -429,7 +427,7 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
         if launch_failed != [0] or launch_state["status"] != "failed":
             fail("missing executable did not produce a failed mission")
         launch_evidence = json.loads(
-            evidence_file(root, launch_state["verification"][0]["evidence"]).read_text(
+            evidence_path(root, launch_state["verification"][0]["evidence"]).read_text(
                 encoding="utf-8"
             )
         )
@@ -456,7 +454,7 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
         if output_failed != [0] or output_state["status"] != "failed":
             fail("output limit did not finalize the mission as failed")
         output_evidence = json.loads(
-            evidence_file(root, output_state["verification"][0]["evidence"]).read_text(
+            evidence_path(root, output_state["verification"][0]["evidence"]).read_text(
                 encoding="utf-8"
             )
         )
@@ -519,15 +517,14 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
                 root, "torn-recovery", torn_paths
             )
             torn_state["updated_at"] = module["utc_now"]()
-            metadata = {
-                "deep": False,
-                "state_hash": module["hash_value"](torn_state),
-            }
             pending_event = make_event(
                 "torn-recovery",
                 "mission_audited",
                 "validator",
-                metadata,
+                {
+                    "deep": False,
+                    "state_hash": module["hash_value"](torn_state),
+                },
                 torn_events[-1]["event_hash"],
             )
             atomic_write_json(
@@ -540,8 +537,8 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
                 handle.flush()
                 os.fsync(handle.fileno())
             recover_pending(torn_paths)
-        recovered_events = read_events(torn_paths["events"], "torn-recovery")
-        if recovered_events[-1]["event_id"] != pending_event["event_id"]:
+        recovered = read_events(torn_paths["events"], "torn-recovery")
+        if recovered[-1]["event_id"] != pending_event["event_id"]:
             fail("pending transaction did not repair the torn journal tail")
         if torn_paths["pending"].exists():
             fail("recovered pending transaction was not cleared")
@@ -635,10 +632,13 @@ def validate_engine(event_schema: dict[str, Any]) -> None:
         live_lock.unlink()
 
     source = (ROOT / "scripts" / "glaciereq-mission.py").read_text(encoding="utf-8")
-    forbidden = ("shell=True", "os.system(", ".read_bytes()", "capture_output=True")
-    for token in forbidden:
+    for token in ("shell=True", "os.system(", "capture_output=True"):
         if token in source:
             fail(f"mission engine contains forbidden execution pattern: {token}")
+    hash_start = source.index("def hash_artifact")
+    hash_end = source.index("def artifact_snapshot_hash")
+    if ".read_bytes()" in source[hash_start:hash_end]:
+        fail("artifact hashing must stream files rather than loading them whole")
     for token in (
         "shell=False",
         "start_new_session",
