@@ -9,6 +9,26 @@ impl MvpAgent {
             let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
         }
     }
+    /// Hard-stop a live session before wiping its history.
+    ///
+    /// Cancels the turn (subagents + background tasks), shuts the actor down,
+    /// reaps process scope, then waits briefly for flush so delete can remove
+    /// the session directory without the actor rewriting it.
+    pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) {
+        let Some(handle) = self.sessions.borrow().get(id).cloned() else {
+            return;
+        };
+        let _ = handle.cmd_tx.send(SessionCommand::Cancel {
+            cancel_subagents: true,
+            kill_background_tasks: true,
+            rewind_if_pristine: false,
+            trigger: Some("session_delete".into()),
+        });
+        let _ = handle.cmd_tx.send(SessionCommand::Shutdown);
+        drop(handle);
+        self.remove_session_terminal(id, SessionLiveState::Completed);
+        self.drain_old_session_thread(id).await;
+    }
     /// Finalize the cloud session replica (fire-and-forget, "Hook 4").
     ///
     /// Marks the session **done** upstream, so this MUST only run on a genuine
@@ -28,36 +48,46 @@ impl MvpAgent {
             });
         }
     }
+    /// The funnel for a handle leaving `self.sessions` (the spawn-path insert
+    /// reaps any displaced handle the same way): reaps its child-process tree
+    /// on the agent thread, so even a wedged session's tree is reclaimed.
+    ///
+    /// The reap is a synchronous SIGKILL issued before the actor drains
+    /// `Shutdown` — deliberately, including on non-terminal idle-unload:
+    /// enrolled children are resident-session-scoped by contract, so graceful
+    /// child teardown belongs to the enrolling owner while the actor is live,
+    /// not to this funnel.
+    pub(super) fn take_session(&self, id: &acp::SessionId) -> Option<SessionHandle> {
+        let handle = self.sessions.borrow_mut().remove(id);
+        if let Some(handle) = &handle
+            && let Some(scope) = &handle.tool_context.process_scope
+        {
+            scope.kill_all();
+        }
+        handle
+    }
     /// Remove a session without finalizing; it stays resumable on disk.
     pub(crate) fn remove_session(&self, id: &acp::SessionId) {
-        self.sessions.borrow_mut().remove(id);
-        self.dispatch_locks.borrow_mut().remove(id);
-        self.session_threads.borrow_mut().remove(id);
-        self.session_index_claims.borrow_mut().remove(id);
-        self.require_gateway_sessions.borrow_mut().remove(id);
-        self.model_unavailable_sessions
-            .borrow_mut()
-            .remove(id.0.as_ref());
-        self.permission_event_receivers.borrow_mut().remove(id);
-        self.session_turn_numbers.borrow_mut().remove(id);
-        self.session_live_state.borrow_mut().remove(id);
+        let _ = self
+            .subagent_event_tx
+            .send(xai_grok_tools::implementations::grok_build::task::types::SubagentEvent::TeardownSession {
+                parent_session_id: id.0.to_string(),
+            });
+        self.take_session(id);
+        self.session_registry.release(id);
         if let Some(ops) = self.workspace_ops.borrow().as_ref() {
             ops.end_local_session(id.0.as_ref());
         }
-        let _ = self
-            .subagent_event_tx
-            .send(xai_grok_tools::implementations::grok_build::task::types::SubagentEvent::DiscardSessionCompletions {
-                parent_session_id: id.0.to_string(),
-            });
     }
-    /// Get-or-create the per-session dispatch lock (see
-    /// [`Self::dispatch_locks`]). Cheap clone of the shared `Rc`.
+    /// Get-or-create the per-session dispatch lock. `prompt` holds it across
+    /// intake so a cancel cannot overtake the prompt it targets.
+    /// Get-or-create the per-session prompt-intake lock. `prompt` holds it across
+    /// its intake preamble and `cancel` around its `Cancel` send, so prompts land
+    /// in submission order and a cancel cannot overtake the prompt it targets.
+    /// Cancels therefore wait behind an intake preamble: keep preambles lean.
+    /// Bridge cancels take their own path and stay unordered against this lock.
     pub(super) fn dispatch_lock(&self, id: &acp::SessionId) -> std::rc::Rc<tokio::sync::Mutex<()>> {
-        self.dispatch_locks
-            .borrow_mut()
-            .entry(id.clone())
-            .or_default()
-            .clone()
+        self.session_registry.dispatch_lock(id)
     }
     /// Close a session in response to an **explicit** terminal close
     /// (`x.ai/session/close`). Finalizes the cloud replica (genuine session
@@ -68,14 +98,12 @@ impl MvpAgent {
     }
     /// Record the coarse lifecycle state for a session.
     pub(super) fn set_session_live_state(&self, id: &acp::SessionId, state: SessionLiveState) {
-        self.session_live_state
-            .borrow_mut()
-            .insert(id.clone(), state);
+        self.session_registry.set_live(id, state);
     }
     /// Read the recorded lifecycle state for a session (test observability).
     #[cfg(test)]
     pub(super) fn session_live_state_for(&self, id: &acp::SessionId) -> Option<SessionLiveState> {
-        self.session_live_state.borrow().get(id).copied()
+        self.session_registry.live(id)
     }
     /// Roster-delta hook for a terminally removed session. Broadcasts an
     /// `x.ai/sessions/changed` notification with the session in `removed` so
@@ -185,7 +213,7 @@ impl MvpAgent {
         if turn_running {
             return RosterActivity::Working;
         }
-        match self.session_live_state.borrow().get(id).copied() {
+        match self.session_registry.live(id) {
             Some(SessionLiveState::Completed) => RosterActivity::Completed,
             Some(SessionLiveState::DeadFailed) => RosterActivity::Dead,
             Some(SessionLiveState::Dormant) => RosterActivity::Dormant,
@@ -293,13 +321,7 @@ impl MvpAgent {
     /// check is required. Runs both opportunistically and from the join-handle
     /// supervisor (`ensure_session_supervisor`).
     pub(super) fn sweep_dead_sessions(&self) {
-        let dead: Vec<acp::SessionId> = self
-            .session_threads
-            .borrow()
-            .iter()
-            .filter(|(_, t)| t.is_finished())
-            .map(|(id, _)| id.clone())
-            .collect();
+        let dead = self.session_registry.finished_threads();
         for id in dead {
             if self.sessions.borrow().contains_key(&id) {
                 tracing::warn!(
@@ -308,8 +330,7 @@ impl MvpAgent {
                 );
                 self.reap_dead_session(&id);
             } else {
-                self.session_threads.borrow_mut().remove(&id);
-                self.session_live_state.borrow_mut().remove(&id);
+                self.session_registry.clear_exited_thread(&id);
                 tracing::debug!(
                     session_id = %id.0,
                     "Reaped finished thread for non-resident session (clean exit)"
@@ -407,8 +428,9 @@ impl MvpAgent {
             .await
             .unwrap_or(true)
     }
-    /// Entry counts for every collection [`Self::remove_session`] drains,
-    /// plus workspace bindings and shared coordinator state.
+    /// Entry counts `remove_session` and `x.ai/debug/agent` care about, which
+    /// includes maps outside [`SessionResources`]: the handle map, load guards,
+    /// rewind snapshots, subagents, and workspace bindings.
     pub(crate) async fn registry_snapshot(&self) -> RegistrySnapshot {
         let subagents =
             xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
@@ -416,24 +438,29 @@ impl MvpAgent {
             )
             .registry_counts()
             .await;
+        let workspace_ops = self.workspace_ops.borrow();
+        let workspace = workspace_ops
+            .as_ref()
+            .and_then(|ops| ops.workspace_handle());
+        let counts = self.session_registry.counts();
         RegistrySnapshot {
             sessions: self.sessions.borrow().len(),
-            session_threads: self.session_threads.borrow().len(),
-            dispatch_locks: self.dispatch_locks.borrow().len(),
-            session_turn_numbers: self.session_turn_numbers.borrow().len(),
-            permission_event_receivers: self.permission_event_receivers.borrow().len(),
-            model_unavailable_sessions: self.model_unavailable_sessions.borrow().len(),
-            session_live_state: self.session_live_state.borrow().len(),
-            session_index_claims: self.session_index_claims.borrow().len(),
-            require_gateway_sessions: self.require_gateway_sessions.borrow().len(),
+            loading_sessions: self.loading_sessions.borrow().len(),
+            session_threads: counts.session_threads,
+            resident_resources: counts.resident_resources,
+            retained_resources: counts.retained_resources,
+            dispatch_locks: counts.dispatch_locks,
+            session_turn_numbers: counts.session_turn_numbers,
+            permission_event_receivers: counts.permission_event_receivers,
+            model_unavailable_sessions: counts.model_unavailable_sessions,
+            session_live_state: counts.session_live_state,
+            session_index_claims: counts.session_index_claims,
+            require_gateway_sessions: counts.require_gateway_sessions,
             subagent_pending: subagents.pending,
             subagent_active: subagents.active,
             subagent_completed: subagents.completed,
-            workspace_bindings: self
-                .workspace_ops
-                .borrow()
-                .as_ref()
-                .and_then(|ops| ops.workspace_handle().map(|h| h.session_count())),
+            workspace_bindings: workspace.map(|h| h.session_count()),
+            workspace_activity_sessions: workspace.map(|h| h.activity_tracker().session_count()),
         }
     }
 }
@@ -442,7 +469,10 @@ impl MvpAgent {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RegistrySnapshot {
     pub sessions: usize,
+    pub loading_sessions: usize,
     pub session_threads: usize,
+    pub resident_resources: usize,
+    pub retained_resources: usize,
     pub dispatch_locks: usize,
     pub session_turn_numbers: usize,
     pub permission_event_receivers: usize,
@@ -454,4 +484,5 @@ pub struct RegistrySnapshot {
     pub subagent_active: usize,
     pub subagent_completed: usize,
     pub workspace_bindings: Option<usize>,
+    pub workspace_activity_sessions: Option<usize>,
 }
