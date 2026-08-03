@@ -18,6 +18,8 @@ pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
     persist_setting, sanitize_user_error,
 };
+#[cfg(feature = "local-workspace")]
+pub(crate) use helpers::reject_non_fs_only_advertised_tools;
 use helpers::*;
 use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;
@@ -66,7 +68,7 @@ pub(crate) fn execute(
         }
         Effect::SetWorkingDir { path } => {
             if let Err(e) = std::env::set_current_dir(&path) {
-                tracing::warn!(error = %e, "project picker: failed to set_current_dir");
+                tracing::warn!(error = %e, "change location: failed to set_current_dir");
             }
         }
         Effect::ScheduleClearAuthCopyFeedback { generation } => {
@@ -142,9 +144,7 @@ pub(crate) fn execute(
             #[allow(unused_mut)]
             let mut meta = session_flags.to_meta();
             let is_chat_path = chat_kind || session_flags.chat_mode;
-            if is_chat_path {
-                apply_chat_kind_meta(&mut meta);
-            }
+            finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -238,13 +238,11 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
             let mut meta = session_flags.to_meta();
-            if chat_kind || session_flags.chat_mode {
-                meta.get_or_insert_with(acp::Meta::new)
-                    .insert(
-                        "x.ai/session".into(),
-                        serde_json::json!({ "kind": "chat" }),
-                    );
-            }
+            finalize_chat_session_meta(
+                &mut meta,
+                chat_kind || session_flags.chat_mode,
+                session_flags,
+            );
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -520,10 +518,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
             let is_chat_path = chat_kind || session_flags.chat_mode;
-            if is_chat_path {
-                apply_chat_kind_meta(&mut meta);
-                scrub_chat_workspace_bind_meta(&mut meta);
-            }
+            finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
             if let Some(true) = session_flags.restore_code {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("x.ai/restore_code".into(), serde_json::Value::Bool(true));
@@ -714,7 +709,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSessionList { query, seq } => {
+        Effect::FetchSessionList { query, seq, kind_filter } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
             tasks
@@ -727,6 +722,19 @@ pub(crate) fn execute(
                         params["query"] = serde_json::Value::String(q.clone());
                     } else {
                         params["allowRelax"] = serde_json::Value::Bool(true);
+                    }
+                    if let Some(kinds) = &kind_filter {
+                        params["_meta"] = serde_json::json!({
+                        "x.ai/facetFilters": { "kind": kinds },
+                    });
+                        tracing::info!(
+                        target: "grok.pager.workspace_mode",
+                        event = "session_list_fetch",
+                        kind_filter = ?kinds,
+                        query = ?query,
+                        seq,
+                        "FetchSessionList with kind facet filter"
+                    );
                     }
                     let request = acp::ExtRequest::new(
                         "x.ai/session/list",
@@ -1942,14 +1950,6 @@ pub(crate) fn execute(
                 "memory_modal_fullscreen",
                 fullscreen,
                 "memory fullscreen",
-            );
-        }
-        Effect::PersistProjectPickerDisabled { disabled } => {
-            persist_hint(
-                tasks,
-                "project_picker_disabled",
-                disabled,
-                "project picker opt-out",
             );
         }
         Effect::PersistDashboard(persisted) => {
@@ -3247,7 +3247,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::DeleteSession { source, session_id, cwd } => {
+        Effect::DeleteSession { source, session_id, cwd, after } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3291,6 +3291,7 @@ pub(crate) fn execute(
                             TaskResult::DeleteSessionComplete {
                                 source,
                                 session_id,
+                                after,
                             }
                         }
                         Err(e) => {
@@ -3305,7 +3306,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SetCodingDataSharing { agent_id, opted_in, rollback_to_opted_in } => {
+        Effect::SetCodingDataSharing {
+            agent_id,
+            opted_in,
+            rollback_to_opted_in,
+            seq,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3328,6 +3334,7 @@ pub(crate) fn execute(
                                         agent_id,
                                         error: format!("malformed response: {e}"),
                                         rollback_to_opted_in,
+                                        seq,
                                     };
                                 }
                             };
@@ -3343,6 +3350,7 @@ pub(crate) fn execute(
                                     agent_id,
                                     error: msg,
                                     rollback_to_opted_in,
+                                    seq,
                                 };
                             }
                             let confirmed_opted_in = wrapper
@@ -3353,6 +3361,7 @@ pub(crate) fn execute(
                             TaskResult::CodingDataSharingUpdated {
                                 agent_id,
                                 opted_in: confirmed_opted_in,
+                                seq,
                             }
                         }
                         Err(e) => {
@@ -3360,6 +3369,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 error: format!("{e}"),
                                 rollback_to_opted_in,
+                                seq,
                             }
                         }
                     }
@@ -3540,6 +3550,7 @@ pub(crate) fn execute(
         }
         Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
             let tx = acp_tx.clone();
+            let is_api_key_auth = session_flags.is_api_key_auth;
             tasks
                 .spawn(async move {
                     let request = acp::ExtRequest::new(
@@ -3574,9 +3585,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::BtwResponse {
                                 agent_id,
-                                result: Err(
-                                    sanitize_user_error(&format!("side question failed: {e}")),
-                                ),
+                                result: Err(format_acp_error(&e, is_api_key_auth)),
                                 minimal_request_id,
                             }
                         }
@@ -4552,7 +4561,7 @@ fn format_session_info(
         "{title_line}  Shell version: {version_display}\n{auth_lines}  Session ID: {session_id}{conversation_line}\n  Working directory: {cwd}\n  Model: {model_display}{model_hash_line}{backend_line}{sandbox_line}{turn_line}\n  Context: {used} / {total} tokens ({pct}%)"
     )
 }
-/// Auth section for `/session-info` — login method + where to manage account/credits.
+/// Auth section for `/session-info` — active login method.
 ///
 /// This reflects the process login / ACP auth method, not per-model sampling
 /// credentials (a model `api_key`/`env_key` can still own the turn).
@@ -4564,12 +4573,10 @@ fn format_auth_lines(is_api_key_auth: bool, api_key_env_set: bool) -> String {
             "  Auth method: API key\n"
         };
         return format!(
-            "{method}  Manage account and credits: console.x.ai\n  Run `grok login` to use your SuperGrok subscription instead.\n"
+            "{method}  Run `grok login` to use your SuperGrok subscription instead.\n"
         );
     }
-    String::from(
-        "  Auth method: OAuth\n  Manage account and credits: https://grok.com/?_s=billing\n",
-    )
+    String::from("  Auth method: OAuth\n")
 }
 /// Build the single text content block for a plain `Effect::SendPrompt`.
 ///
