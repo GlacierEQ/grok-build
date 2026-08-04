@@ -47,7 +47,7 @@ pub(crate) mod screen_mode_relaunch;
 pub mod signal_handler;
 mod turn_completion;
 mod xt_filter;
-pub(crate) use crate::terminal::kitty_flags_pushed;
+pub(crate) use crate::terminal::{kitty_flags_pushed, kitty_releases_reported};
 pub use cli::{
     AgentArgs, AgentCmd, Command, HeadlessArgs, LeaderArgs, LeaderMgmtArgs, LeaderMgmtCommand,
     LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WrapArgs,
@@ -70,8 +70,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 use xai_grok_shell::util::config;
 /// Tracks the extra Kitty keyboard layer pushed while the `/gboom` game is
-/// open (see [`push_gboom_keyboard_flags`]). Kept separate from
-/// `KITTY_FLAGS_PUSHED` so teardown pops both, in LIFO order.
+/// open (see [`push_gboom_keyboard_flags`]). Kept separate from the base layer
+/// (`terminal::kitty_keyboard`) so teardown pops both, in LIFO order.
 static GBOOM_KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 /// While the `/gboom` game owns input, additionally request
 /// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` so plain letter keys (WASD) emit
@@ -651,6 +651,19 @@ pub async fn run(
         session_startup::chat_mode_flag_conflict(args.chat(), args.fork_session, args.restore_code)
     {
         anyhow::bail!("{err}");
+    }
+    #[cfg(feature = "local-workspace")]
+    {
+        let lw = session_startup::resolve_local_workspace_config(
+            args.chat(),
+            args.local_workspace(),
+            args.local_workspace_attach(),
+            args.local_workspace_cwd(),
+        )?;
+        if let Some(ref cfg) = lw {
+            session_startup::emit_local_workspace_startup_ux(cfg)?;
+        }
+        session_startup::set_active_local_workspace(lw)?;
     }
     let intent = args
         .session_startup_intent()
@@ -1328,28 +1341,31 @@ fn init_terminal(
                     Ok(true) => None,
                     _ => Some("unsupported"),
                 });
-        let use_keyboard_enhancement = skip_reason.is_none();
-        if use_keyboard_enhancement {
-            let flags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+        crate::terminal::da2::probe_at_startup();
+        let flags = crate::terminal::negotiated_kitty_flags(
+            skip_reason,
+            crate::terminal::da2::detected_packed(),
+        );
+        if flags.is_empty() {
+            tracing::info!(
+                kitty.flags = "none",
+                kitty.skipped_reason = skip_reason.unwrap_or("unknown"),
+                "kitty keyboard protocol skipped"
+            );
+        } else {
             xai_grok_shell::util::with_locked_stderr(|stderr| {
                 let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
             });
             tracing::info!(
                 kitty.flags = ?flags,
                 kitty.disambiguate = true,
-                kitty.report_event_types = true,
+                kitty.report_event_types =
+                    flags.contains(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
                 kitty.report_all_keys = false,
                 "kitty keyboard protocol pushed"
             );
-        } else {
-            tracing::info!(
-                kitty.flags = "none",
-                kitty.skipped_reason = skip_reason.unwrap_or("unknown"),
-                "kitty keyboard protocol skipped"
-            );
         }
-        crate::terminal::set_kitty_flags_pushed(use_keyboard_enhancement);
+        crate::terminal::set_pushed_kitty_flags(flags);
         if mode.is_fullscreen() {
             let backend = CrosstermBackend::new(
                 crate::render::draw::TermWriter::new(frame_tx, writer_sync)
@@ -2014,6 +2030,53 @@ mod tests {
     #[test]
     fn cli_chat_flag_rejected_without_feature() {
         assert!(try_parse_pager(&["grok-pager", "--chat"]).is_err());
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn cli_local_workspace_attach_requires_chat() {
+        assert!(
+            try_parse_pager(&["grok-pager", "--local-workspace-attach=srv"]).is_err(),
+            "attach without --chat must clap-error"
+        );
+        let args =
+            try_parse_pager(&["grok-pager", "--chat", "--local-workspace-attach=srv"]).unwrap();
+        assert_eq!(args.local_workspace_attach(), Some("srv"));
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn cli_local_workspace_own_conflicts_with_attach() {
+        assert!(
+            try_parse_pager(&[
+                "grok-pager",
+                "--chat",
+                "--local-workspace=/tmp/a",
+                "--local-workspace-attach=srv",
+            ])
+            .is_err(),
+            "own + attach must clap-conflict"
+        );
+    }
+    #[cfg(feature = "local-workspace")]
+    #[test]
+    fn cli_local_workspace_cwd_requires_chat() {
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace-cwd=/tmp/a"]).is_err());
+        let args = try_parse_pager(&[
+            "grok-pager",
+            "--chat",
+            "--local-workspace-attach=srv",
+            "--local-workspace-cwd=/tmp/repo",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.local_workspace_cwd(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
+    }
+    #[test]
+    fn cli_local_workspace_flags_rejected_without_feature() {
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace-attach=srv"]).is_err());
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace"]).is_err());
+        assert!(try_parse_pager(&["grok-pager", "--local-workspace-cwd=/tmp"]).is_err());
     }
     #[test]
     fn chat_mode_leader_guard_truth_table() {
